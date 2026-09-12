@@ -31,7 +31,7 @@ struct RulesManagerView: View {
             }
         }
         .background(PSTheme.bgPrimary)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(state.themeMode.colorScheme)
     }
 
     private var sidebar: some View {

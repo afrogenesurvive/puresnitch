@@ -7,7 +7,7 @@ final class MenubarController {
     private let state: AppState
     private let windows: WindowManager
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    private var panel: MenubarPanelController!
     private var trafficCancellable: AnyCancellable?
 
     init(state: AppState, windows: WindowManager) {
@@ -24,14 +24,16 @@ final class MenubarController {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        let popoverView = MenubarPopoverView(close: { [weak self] in self?.popover.performClose(nil) })
-            .environmentObject(state)
-            .environmentObject(windows)
-            .frame(width: 380, height: 540)
-        popover.contentViewController = NSHostingController(rootView: popoverView)
+        // A panel rather than an `NSPopover`: a popover can't be resized by the
+        // user, and this dropdown needs to be. See `MenubarPanelController`.
+        let panelView = MenubarPopoverView(
+            close: { [weak self] in self?.panel.hide() },
+            onResize: { [weak self] translation in self?.panel.resizeBy(translation) },
+            onResizeEnd: { [weak self] in self?.panel.endResize() }
+        )
+        .environmentObject(state)
+        .environmentObject(windows)
+        panel = MenubarPanelController(rootView: panelView)
 
         render()
 
@@ -53,12 +55,14 @@ final class MenubarController {
             showContextMenu()
             return
         }
-        if popover.isShown {
-            popover.performClose(sender)
-        } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        // Activate before showing: the panel is non-activating by design (so it
+        // doesn't steal focus when dismissed), but its mini Rules tab has a
+        // search field, and a text field can't take keystrokes unless the app
+        // is active. Deactivating is also what dismisses the panel.
+        if !panel.isVisible {
             NSApp.activate(ignoringOtherApps: true)
         }
+        panel.toggle(relativeTo: button)
     }
 
     private func showContextMenu() {

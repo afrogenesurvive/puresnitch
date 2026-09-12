@@ -24,7 +24,7 @@ struct NetworkMonitorView: View {
             }
         }
         .background(PSTheme.bgPrimary)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(state.themeMode.colorScheme)
     }
 
     private var sidebar: some View {
@@ -166,8 +166,8 @@ struct NetworkMonitorView: View {
 
     private var statsRow: some View {
         HStack(spacing: 8) {
-            statPill(value: PSFormat.bytesPerSec(state.currentIn), label: "down", color: Color.blue.opacity(0.35))
-            statPill(value: PSFormat.bytesPerSec(state.currentOut), label: "up", color: Color.purple.opacity(0.35))
+            statPill(value: PSFormat.bytesPerSec(state.currentIn), label: "down", color: PSTheme.inPillFill)
+            statPill(value: PSFormat.bytesPerSec(state.currentOut), label: "up", color: PSTheme.outPillFill)
         }
     }
 

@@ -58,6 +58,18 @@ struct SettingsView: View {
                     Toggle("Show download and upload speeds in the menu bar",
                            isOn: $state.showSpeedsInMenuBar)
                 }
+                Section("Appearance") {
+                    Picker("Theme", selection: $state.themeMode) {
+                        ForEach(ThemeMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text("System follows the macOS appearance. Light or Dark pins every window, the menu-bar panel and the alert panel.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
                 Section("General") {
                     Toggle("Launch PureSnitch at login", isOn: $launchAtLogin)
                         .onChange(of: launchAtLogin) { newValue in setLaunchAtLogin(newValue) }

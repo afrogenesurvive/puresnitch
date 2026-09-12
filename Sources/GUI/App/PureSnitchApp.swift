@@ -24,6 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // Appearance first: the status item, the menu-bar panel and every window
+        // are created below, so they should inherit the user's saved choice
+        // rather than flash the system default and repaint a moment later.
+        state.applyTheme()
         windowManager = WindowManager(state: state)
         menubar = MenubarController(state: state, windows: windowManager)
         menubar.install()

@@ -24,7 +24,7 @@ struct AuditView: View {
             }
         }
         .background(PSTheme.bgPrimary)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(state.themeMode.colorScheme)
         .onAppear { state.refreshAudit() }
     }
 

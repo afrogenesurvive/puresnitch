@@ -41,6 +41,44 @@ flavour that requires Apple-issued provisioning profiles.
             └────────────────────────────────────────┘
 ```
 
+## Appearance and the menu-bar dropdown
+
+Two GUI concerns that are easy to get wrong in ways that only surface at runtime.
+
+**Theming.** `ThemeMode` (System / Light / Dark) lives in `AppState` and is
+applied on *both* sides of the AppKit/SwiftUI boundary, because neither side
+covers the other:
+
+- `PSTheme` (`Sources/GUI/Views/Theme.swift`) builds every colour from
+  `NSColor(name:dynamicProvider:)`, so the palette is a *dynamic* colour that
+  re-resolves when the effective appearance changes. The `static let`
+  declarations stay valid because no RGBA is frozen at startup.
+- `AppState.applyTheme()` sets `NSApp.appearance`, which is what reaches window
+  chrome, `NSMenu`, the panel background and the floating alert panel. The
+  system mode must *assign* `nil` rather than skip the assignment, or a
+  previously pinned appearance is never cleared.
+- Each root view carries `.preferredColorScheme(state.themeMode.colorScheme)`,
+  which is what makes the SwiftUI environment agree. A view that pins a literal
+  scheme instead ignores the setting for its whole subtree.
+
+**The dropdown is a panel, not a popover.** `NSPopover` cannot be resized by the
+user — it accepts only a programmatic `contentSize`, and `NSHostingController`
+fights even that by exporting the view's ideal size. `MenubarPanelController`
+therefore anchors a borderless, non-activating `NSPanel` under the status item,
+which buys real drag-to-resize, a remembered size and a minimum size. The cost is
+that the dismissal behaviour `.transient` used to provide has to be arranged by
+hand: Esc via `cancelOperation(_:)`, click-outside via global *and* local event
+monitors, and app deactivation via `NSApplication.didResignActiveNotification`.
+The status item's own window is exempted from the click monitor, because clicking
+it toggles the panel and hiding first would make it close and immediately reopen.
+
+The panel's SwiftUI root switches on `PopoverTab`. `Overview` is the original
+popover contents; `Network`, `Rules` and `AI` render purpose-built mini views
+from `MenubarTabs.swift`. The right-click menu, the header buttons and the
+popover's own "…" buttons keep opening the full `NetworkMonitorView`,
+`RulesManagerView` and `AuditView` windows — the tabs are a glance, never the
+only route to a window.
+
 ## XPC contract
 
 Defined in `Sources/Shared/HelperProtocol.swift`:

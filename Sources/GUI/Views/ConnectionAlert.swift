@@ -68,7 +68,7 @@ struct ConnectionAlertView: View {
         .padding(18)
         .frame(width: 440)
         .background(PSTheme.bgPrimary)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(state.themeMode.colorScheme)
         .onAppear {
             if isIPv6Endpoint { remember = false }
         }
@@ -99,5 +99,6 @@ struct AlertWindowContent: View {
                 Color.clear.frame(width: 440, height: 1)
             }
         }
+        .preferredColorScheme(state.themeMode.colorScheme)
     }
 }

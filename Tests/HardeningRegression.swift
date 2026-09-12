@@ -2454,6 +2454,121 @@ private func waitUntil(seconds: TimeInterval, predicate: () -> Bool) -> Bool {
     return predicate()
 }
 
+/// The menu-bar dropdown became a resizable panel with tabs, and appearance
+/// became user-selectable. Both are the kind of change that regrows silently: a
+/// new view hard-codes `.preferredColorScheme(.dark)`, or the palette quietly
+/// reverts to fixed RGBA and light mode stops responding. Assert the wiring.
+private func testMenubarThemeAndPanelWiring() throws {
+    guard let repositoryPath = ProcessInfo.processInfo.environment["PURESNITCH_REPO_DIR"],
+          !repositoryPath.isEmpty else {
+        throw RegressionFailure(description: "PURESNITCH_REPO_DIR was not provided")
+    }
+    let root = URL(fileURLWithPath: repositoryPath)
+
+    func source(_ relativePath: String) throws -> String {
+        try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
+    }
+
+    // Scan every view, not a list, so an appearance pinned in a *new* file is
+    // caught as well as one pinned in a file this test already knows about.
+    let viewDirectory = root.appendingPathComponent("Sources/GUI/Views")
+    let viewFiles = try FileManager.default
+        .contentsOfDirectory(at: viewDirectory, includingPropertiesForKeys: nil)
+        .filter { $0.pathExtension == "swift" }
+    guard !viewFiles.isEmpty else {
+        throw RegressionFailure(description: "Sources/GUI/Views holds no Swift files")
+    }
+    for file in viewFiles {
+        let text = try String(contentsOf: file, encoding: .utf8)
+        try require(
+            !text.contains(".preferredColorScheme(.dark)")
+                && !text.contains(".preferredColorScheme(.light)"),
+            "\(file.lastPathComponent) pins a colour scheme instead of following the user's theme"
+        )
+    }
+
+    for relativePath in ["Sources/GUI/Views/NetworkMonitor.swift",
+                         "Sources/GUI/Views/RulesManager.swift",
+                         "Sources/GUI/Views/AuditView.swift",
+                         "Sources/GUI/Views/ConnectionAlert.swift",
+                         "Sources/GUI/Views/MenubarPopover.swift"] {
+        let text = try source(relativePath)
+        try require(
+            text.contains(".preferredColorScheme(state.themeMode.colorScheme)"),
+            "\(relativePath) does not follow state.themeMode"
+        )
+    }
+
+    // A fixed palette would compile, look correct in dark mode, and quietly stop
+    // responding to the theme — which is the whole failure this guards against.
+    let theme = try source("Sources/GUI/Views/Theme.swift")
+    try require(
+        theme.contains("NSColor(name: nil) { appearance in"),
+        "PSTheme is no longer built from a dynamic NSColor provider"
+    )
+    try require(
+        theme.contains("enum ThemeMode: String, CaseIterable, Identifiable"),
+        "ThemeMode is missing"
+    )
+    try require(
+        theme.contains(".system: return nil")
+            && theme.contains(".light: return .aqua")
+            && theme.contains(".dark: return .darkAqua"),
+        "ThemeMode no longer maps System/Light/Dark onto nil/aqua/darkAqua"
+    )
+
+    // Window chrome, NSMenu and the panel are unreachable from SwiftUI, so the
+    // theme has to be applied on the AppKit side too.
+    let appState = try source("Sources/GUI/ViewModels/AppState.swift")
+    try require(
+        appState.contains("NSApp.appearance = nil")
+            && appState.contains("NSApp.appearance = NSAppearance(named: name)"),
+        "applyTheme() does not cover both the pinned and the system appearance"
+    )
+    let appDelegate = try source("Sources/GUI/App/PureSnitchApp.swift")
+    try require(
+        appDelegate.contains("state.applyTheme()"),
+        "the saved theme is not applied at launch"
+    )
+
+    // An NSPopover cannot be resized by the user: if one comes back, so does the
+    // bug the panel exists to fix.
+    let menubar = try source("Sources/GUI/App/MenubarController.swift")
+    try require(
+        !menubar.contains("NSPopover("),
+        "the dropdown went back to an NSPopover, which cannot be drag-resized"
+    )
+    try require(
+        menubar.contains("MenubarPanelController(rootView:"),
+        "MenubarController no longer builds the panel"
+    )
+
+    // The tabs render mini views; the menu and the popover's own buttons must
+    // keep opening the full windows.
+    let tabs = try source("Sources/GUI/Views/MenubarTabs.swift")
+    for miniView in ["MiniNetworkMonitorView", "MiniRulesView", "MiniAuditView"] {
+        try require(
+            tabs.contains("struct \(miniView): View"),
+            "\(miniView) is missing"
+        )
+    }
+    let popover = try source("Sources/GUI/Views/MenubarPopover.swift")
+    try require(
+        popover.contains("case .network:")
+            && popover.contains("case .rules:")
+            && popover.contains("case .ai:"),
+        "the popover no longer switches on all three mini-view tabs"
+    )
+    for entry in ["windows.showRulesManager()",
+                  "windows.showNetworkMonitor()",
+                  "windows.showAudit()"] {
+        try require(
+            popover.contains(entry),
+            "the popover stopped offering the full window via \(entry)"
+        )
+    }
+}
+
 @main
 private enum HardeningRegression {
     static func main() {
@@ -2474,6 +2589,7 @@ private enum HardeningRegression {
             ("PF lifecycle and rendering", testPFManagerLifecycleAndRendering),
             ("DNS loopback isolation and cleanup", testDNSProxyIsolationAndCleanup),
             ("DNS start/stop race", testDNSProxyStartStopRace),
+            ("menubar theme and panel wiring", testMenubarThemeAndPanelWiring),
         ]
 
         var failures: [String] = []

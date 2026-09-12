@@ -47,6 +47,17 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(showAlertsOnAllSpaces, forKey: Prefs.alertsAllSpaces) }
     }
 
+    /// Appearance. `.system` — the default — follows macOS. `applyTheme()` fans
+    /// this out to AppKit, which is what makes window chrome, the menu-bar
+    /// panel, `NSMenu` and the alert panel agree with what SwiftUI draws.
+    @Published var themeMode: ThemeMode = ThemeMode(rawValue: UserDefaults.standard.string(forKey: Prefs.themeMode) ?? "") ?? .system {
+        didSet {
+            guard oldValue != themeMode else { return }
+            UserDefaults.standard.set(themeMode.rawValue, forKey: Prefs.themeMode)
+            applyTheme()
+        }
+    }
+
     /// Root/helper-owned desired state. Status assigns this directly; only the
     /// explicit request method below sends a mutation.
     @Published var enforcementEnabled: Bool = false
@@ -65,9 +76,21 @@ final class AppState: ObservableObject {
         helper.setEnforcementEnabled(value)
     }
 
+    /// Pins AppKit's appearance so everything SwiftUI can't reach matches the
+    /// rest of the app. The system path has to *assign* nil — skipping the
+    /// assignment would leave a previously pinned appearance in place forever.
+    func applyTheme() {
+        guard let name = themeMode.appearanceName else {
+            NSApp.appearance = nil
+            return
+        }
+        NSApp.appearance = NSAppearance(named: name)
+    }
+
     enum Prefs {
         static let showSpeeds = "PSShowSpeedsInMenuBar"
         static let alertsAllSpaces = "PSShowAlertsOnAllSpaces"
+        static let themeMode = "PSThemeMode"
     }
 
     let helper = HelperClient()

@@ -1,24 +1,127 @@
 import SwiftUI
 import AppKit
 
+/// The user's appearance choice. `.system` follows macOS; the other two pin the
+/// whole app — windows, the menu-bar panel, `NSMenu` and the alert panel — to
+/// one appearance.
+enum ThemeMode: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    /// nil means "inherit", which is what SwiftUI wants for "follow the system".
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+
+    /// The AppKit half of the same choice. SwiftUI can't reach window chrome,
+    /// the popover/panel background, `NSMenu` or the floating alert panel, so
+    /// both halves are applied together — see `AppState.applyTheme()`.
+    var appearanceName: NSAppearance.Name? {
+        switch self {
+        case .system: return nil
+        case .light: return .aqua
+        case .dark: return .darkAqua
+        }
+    }
+}
+
 enum PSTheme {
-    static let bgPrimary = Color(NSColor(red: 0.075, green: 0.075, blue: 0.085, alpha: 1))
-    static let bgSecondary = Color(NSColor(red: 0.105, green: 0.105, blue: 0.115, alpha: 1))
-    static let bgTertiary = Color(NSColor(red: 0.135, green: 0.135, blue: 0.145, alpha: 1))
-    static let bgSidebar = Color(NSColor(red: 0.085, green: 0.085, blue: 0.095, alpha: 1))
-    static let bgRow = Color(NSColor(red: 0.115, green: 0.115, blue: 0.13, alpha: 1))
-    static let bgRowAlt = Color(NSColor(red: 0.13, green: 0.13, blue: 0.145, alpha: 1))
-    static let stroke = Color(NSColor(red: 0.22, green: 0.22, blue: 0.24, alpha: 1))
-    static let accent = Color(NSColor(red: 1.0, green: 0.45, blue: 0.30, alpha: 1)) // Little Snitch orange
-    static let accentGreen = Color(NSColor(red: 0.28, green: 0.78, blue: 0.45, alpha: 1))
-    static let accentRed = Color(NSColor(red: 0.95, green: 0.30, blue: 0.30, alpha: 1))
-    static let accentYellow = Color(NSColor(red: 1.0, green: 0.78, blue: 0.20, alpha: 1))
-    static let accentBlue = Color(NSColor(red: 0.30, green: 0.55, blue: 1.0, alpha: 1))
-    static let trafficIn = Color(NSColor(red: 0.95, green: 0.45, blue: 0.95, alpha: 1)) // pink/magenta
-    static let trafficOut = Color(NSColor(red: 0.40, green: 0.60, blue: 1.0, alpha: 1)) // blue
-    static let textPrimary = Color(NSColor(white: 0.95, alpha: 1))
-    static let textSecondary = Color(NSColor(white: 0.65, alpha: 1))
-    static let textMuted = Color(NSColor(white: 0.45, alpha: 1))
+    /// A colour that re-resolves every time the effective appearance changes.
+    /// `static let` is still correct for the palette: the stored value is a
+    /// *dynamic* NSColor, not a frozen RGBA, so switching between light and
+    /// dark needs no reload and no view rebuild.
+    private static func adaptive(_ dark: NSColor, _ light: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+        })
+    }
+
+    private static func grey(_ dark: CGFloat, _ light: CGFloat) -> Color {
+        adaptive(NSColor(white: dark, alpha: 1), NSColor(white: light, alpha: 1))
+    }
+
+    private static func rgb(
+        _ dark: (CGFloat, CGFloat, CGFloat),
+        _ light: (CGFloat, CGFloat, CGFloat)
+    ) -> Color {
+        adaptive(
+            NSColor(red: dark.0, green: dark.1, blue: dark.2, alpha: 1),
+            NSColor(red: light.0, green: light.1, blue: light.2, alpha: 1)
+        )
+    }
+
+    /// Like `rgb`, but the dark side carries alpha so a tint can sit over the
+    /// dark surface the way it always has, while light mode gets a full-strength
+    /// colour. Only for backdrops that carry white text.
+    private static func fill(
+        _ dark: (CGFloat, CGFloat, CGFloat),
+        alpha darkAlpha: CGFloat,
+        _ light: (CGFloat, CGFloat, CGFloat)
+    ) -> Color {
+        adaptive(
+            NSColor(red: dark.0, green: dark.1, blue: dark.2, alpha: darkAlpha),
+            NSColor(red: light.0, green: light.1, blue: light.2, alpha: 1)
+        )
+    }
+
+    // MARK: - Surfaces
+
+    static let bgPrimary = grey(0.075, 0.980)
+    static let bgSecondary = grey(0.105, 0.955)
+    static let bgTertiary = grey(0.135, 0.915)
+    static let bgSidebar = grey(0.085, 0.945)
+    static let bgRow = grey(0.115, 0.935)
+    static let bgRowAlt = grey(0.130, 0.905)
+    static let stroke = grey(0.220, 0.820)
+
+    // MARK: - Text
+
+    static let textPrimary = grey(0.950, 0.110)
+    static let textSecondary = grey(0.650, 0.380)
+    static let textMuted = grey(0.450, 0.560)
+
+    // MARK: - Accents
+    //
+    // The dark values are the original ones, unchanged: dark mode must look
+    // exactly as it did before. The light values are the same hues darkened,
+    // because the originals were only ever tuned against a near-black surface
+    // (saturated yellow on white in particular reads as a highlighter smear).
+
+    static let accent = rgb((1.00, 0.45, 0.30), (0.84, 0.30, 0.14)) // Little Snitch orange
+    static let accentGreen = rgb((0.28, 0.78, 0.45), (0.08, 0.52, 0.26))
+    static let accentRed = rgb((0.95, 0.30, 0.30), (0.78, 0.15, 0.17))
+    static let accentYellow = rgb((1.00, 0.78, 0.20), (0.66, 0.44, 0.00))
+    static let accentBlue = rgb((0.30, 0.55, 1.00), (0.12, 0.39, 0.88))
+    // MARK: - Traffic
+    //
+    // Download/in is blue and upload/out is purple, which is the language the
+    // rest of the app already speaks. The two constants used to hold the
+    // opposite hues, and were never read by anything — so wiring them up for the
+    // first time would have silently swapped the colours on every graph.
+
+    static let trafficIn = rgb((0.40, 0.60, 1.00), (0.10, 0.34, 0.85))
+    static let trafficOut = rgb((0.62, 0.36, 0.95), (0.42, 0.16, 0.72))
+
+    /// Backdrops that carry white text. A translucent tint over a near-black
+    /// surface reads as a deep colour; the same value over a light surface
+    /// washes out and leaves white text illegible.
+    static let inPillFill = fill((0.30, 0.50, 1.00), alpha: 0.40, (0.08, 0.30, 0.80))
+    static let outPillFill = fill((0.58, 0.32, 0.92), alpha: 0.40, (0.40, 0.14, 0.70))
 }
 
 enum AppIcon {
