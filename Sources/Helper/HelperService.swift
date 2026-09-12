@@ -4,11 +4,17 @@ import Security
 final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     private static let supportDirectory = "/Library/Application Support/PureSnitch"
     private static let databaseName = "puresnitch.sqlite"
+    /// Declarations found by audience discovery, kept as JSON so the report can
+    /// be rebuilt without re-reading the owner's configuration.
+    private static let proxyDeclarationsSettingKey = "audience_proxy_declarations"
     private static let unauthorizedMessage = "unauthorized helper client"
     private let store: RuleStore
     private let pf = PFManager()
     private let dns = DNSProxy()
     private let netmon = NetMonitor()
+    /// Derives the git repository behind a process working directory so a bare
+    /// `node`/`python` agent can be attributed to the project it runs in.
+    private let repoLocator = RepoLocator()
     private let blocklists: BlocklistManager
     private let listener: NSXPCListener
     private var clientConnections: [NSXPCConnection] = []
@@ -97,13 +103,14 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         }
         netmon.onConnections = { [weak self] conns in
             guard let self else { return }
+            let annotated = self.annotateAudiences(conns)
             do {
-                try self.store.recordConnections(conns)
+                try self.store.recordConnections(annotated)
             } catch {
                 PSLog.error(PSLog.netmon, "connection snapshot persistence failed: \(error)")
             }
             self.broadcast { _, c in
-                if let data = try? JSONEncoder().encode(conns) {
+                if let data = try? JSONEncoder().encode(annotated) {
                     c.notifyConnection(connectionJSON: data)
                 }
             }
@@ -186,10 +193,58 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
                 PSLog.error(PSLog.pf, "legacy PF migration remains unresolved after startup reconciliation")
             }
         }
+        seedDiscoveredAudiences()
         netmon.start()
         mutationLock.unlock()
         listener.resume()
         Task { await blocklists.refresh() }
+    }
+
+    /// Seeds audiences from the owner's client configuration and records what
+    /// those clients declare about local proxies.
+    ///
+    /// Monitoring must start whether or not this succeeds, so every failure here
+    /// is logged and swallowed. Seeding runs before the monitor so the first
+    /// snapshot is already attributed.
+    private func seedDiscoveredAudiences() {
+        // Before the GUI has claimed ownership there is no persisted owner, so
+        // the console user is the best available answer.
+        guard let uid = ownerUID ?? HelperSecurityState.consoleUID(),
+              let home = AudienceDiscovery.homeDirectory(forUID: uid) else {
+            PSLog.info(PSLog.helper, "audience discovery skipped: the owner's home directory could not be resolved")
+            return
+        }
+
+        let result = AudienceDiscovery(configuration: .standard(homeDirectory: home)).scan()
+        for warning in result.warnings {
+            PSLog.info(PSLog.helper, "audience discovery: \(warning)")
+        }
+
+        let plan = AudienceSeeder.plan(discovered: result.audiences, existing: store.allAudiences())
+        var seeded = 0
+        for audience in plan.upserts {
+            do {
+                try audience.validateForPersistence()
+                try store.upsertAudience(audience)
+                seeded += 1
+            } catch {
+                PSLog.error(PSLog.helper, "audience '\(audience.name)' was not stored: \(error.localizedDescription)")
+            }
+        }
+
+        if let data = try? JSONEncoder().encode(result.declarations) {
+            try? store.setSetting(Self.proxyDeclarationsSettingKey, String(decoding: data, as: UTF8.self))
+        }
+
+        let report = ProxyExpectationBuilder.build(
+            declarations: result.declarations,
+            observed: store.recentConnections(limit: 500)
+        )
+        PSLog.info(
+            PSLog.helper,
+            "audience discovery seeded \(seeded) audiences, kept \(plan.skipped.count) manual, "
+                + "\(result.declarations.count) proxy declarations, \(report.unproxiedAudiences.count) unproxied audiences"
+        )
     }
 
     /// Signal handlers dispatch here on a normal queue. Runtime state is
@@ -308,6 +363,15 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
             }
         }
         return delivered
+    }
+
+    /// Tag every observed connection with the audience and repository it belongs
+    /// to, once, before it is persisted or pushed. Doing it in a single place is
+    /// what keeps the stored audit trail and the UI from disagreeing about
+    /// attribution, and the audience table is small enough to read per poll.
+    private func annotateAudiences(_ connections: [Connection]) -> [Connection] {
+        AudienceResolver(audiences: store.allAudiences())
+            .annotate(connections, repoLocator: repoLocator)
     }
 
     private func handleDNSAsk(domain: String, completion: @escaping (Bool) -> Void) {
@@ -868,6 +932,74 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         guard authorizeCurrentXPCRequest(orReject: { reply(Data()) }) else { return }
         let conns = store.recentConnections(limit: limit, status: .denied)
         reply((try? JSONEncoder().encode(conns)) ?? Data())
+    }
+
+    // MARK: - Audience audit
+
+    func listAudiences(reply: @escaping (Data) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(Data()) }) else { return }
+        reply((try? JSONEncoder().encode(store.allAudiences())) ?? Data())
+    }
+
+    func addAudience(audienceJSON: Data, reply: @escaping (Bool, String?) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(false, Self.unauthorizedMessage) }) else { return }
+        mutationLock.lock(); defer { mutationLock.unlock() }
+        do {
+            var audience = try JSONDecoder().decode(Audience.self, from: audienceJSON)
+            try audience.validateForPersistence()
+            // Anything a client stores is manual by definition, whatever the
+            // payload claimed, so a later rescan can never rewrite it.
+            audience.source = .manual
+            try store.upsertAudience(audience)
+            reply(true, nil)
+        } catch {
+            reply(false, error.localizedDescription)
+        }
+    }
+
+    func removeAudience(idString: String, reply: @escaping (Bool, String?) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(false, Self.unauthorizedMessage) }) else { return }
+        mutationLock.lock(); defer { mutationLock.unlock() }
+        guard let id = UUID(uuidString: idString) else { reply(false, "invalid audience id"); return }
+        do {
+            try store.deleteAudience(id: id)
+            reply(true, nil)
+        } catch {
+            reply(false, "audience was not removed: \(error.localizedDescription)")
+        }
+    }
+
+    func setAudienceEnabled(idString: String, enabled: Bool, reply: @escaping (Bool, String?) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(false, Self.unauthorizedMessage) }) else { return }
+        mutationLock.lock(); defer { mutationLock.unlock() }
+        guard let id = UUID(uuidString: idString) else { reply(false, "invalid audience id"); return }
+        do {
+            try store.setAudienceEnabled(id: id, enabled: enabled)
+            reply(true, nil)
+        } catch {
+            reply(false, "audience state was not saved: \(error.localizedDescription)")
+        }
+    }
+
+    func rediscoverAudiences(reply: @escaping (Data) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(Data()) }) else { return }
+        mutationLock.lock(); defer { mutationLock.unlock() }
+        seedDiscoveredAudiences()
+        reply((try? JSONEncoder().encode(store.allAudiences())) ?? Data())
+    }
+
+    func proxyExpectationReport(reply: @escaping (Data) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(Data()) }) else { return }
+        let report = ProxyExpectationBuilder.build(
+            declarations: Self.decodeDeclarations(store.getSetting(Self.proxyDeclarationsSettingKey)),
+            observed: store.recentConnections(limit: 500)
+        )
+        reply((try? JSONEncoder().encode(report)) ?? Data())
+    }
+
+    private static func decodeDeclarations(_ raw: String?) -> [ProxyDeclaration] {
+        guard let raw, let data = raw.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([ProxyDeclaration].self, from: data)) ?? []
     }
 
     func recentDenied(limit: Int, reply: @escaping (Data) -> Void) {

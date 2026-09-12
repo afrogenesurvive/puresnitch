@@ -51,6 +51,16 @@ struct MenubarPopoverView: View {
                 }
                 .buttonStyle(.plain).foregroundColor(PSTheme.textPrimary)
 
+                Button(action: { close(); windows.showAudit() }) {
+                    HStack {
+                        Text("AI Activity…").font(.system(size: 13))
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                }
+                .buttonStyle(.plain).foregroundColor(PSTheme.textPrimary)
+
                 Button(action: { close(); windows.showSettings() }) {
                     HStack {
                         Text("PureSnitch Settings…").font(.system(size: 13))

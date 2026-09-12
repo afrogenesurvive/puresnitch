@@ -45,6 +45,9 @@ struct NetworkMonitorView: View {
                     ForEach(filteredProcesses) { p in
                         ProcessRow(stats: p, selected: selectedProcess == p.id)
                             .onTapGesture { selectedProcess = (selectedProcess == p.id ? nil : p.id) }
+                            .contextMenu {
+                                Button("Watch this process") { watch(p) }
+                            }
                     }
                 }
             }
@@ -54,6 +57,16 @@ struct NetworkMonitorView: View {
     private var filteredProcesses: [AppState.ProcessStats] {
         if searchText.isEmpty { return state.topProcesses }
         return state.topProcesses.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    /// Ad-hoc audience from the connection list. A brand-new agent or MCP server
+    /// shows up here before any configuration exists to describe it, so this is
+    /// the only way to pull it into the audit without editing files by hand.
+    private func watch(_ process: AppState.ProcessStats) {
+        guard let connection = state.connections.first(where: {
+            ($0.processBundleId ?? $0.processPath) == process.id
+        }) else { return }
+        state.watchProcess(of: connection)
     }
 
     private var mapPane: some View {

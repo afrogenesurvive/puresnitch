@@ -6,6 +6,7 @@ import Combine
 final class WindowManager {
     private let state: AppState
     private weak var networkMonitorWindow: NSWindow?
+    private weak var auditWindow: NSWindow?
     private weak var rulesWindow: NSWindow?
     private weak var settingsWindow: NSWindow?
     private var alertWindow: NSWindow?
@@ -26,6 +27,17 @@ final class WindowManager {
             minSize: NSSize(width: 900, height: 550),
             autosaveName: "PureSnitch.NetworkMonitor",
             content: NetworkMonitorView().environmentObject(state)
+        )
+    }
+
+    func showAudit() {
+        if let w = auditWindow { focus(w); return }
+        auditWindow = makeWindow(
+            title: "AI Activity",
+            defaultSize: NSSize(width: 1180, height: 720),
+            minSize: NSSize(width: 960, height: 560),
+            autosaveName: "PureSnitch.Audit",
+            content: AuditView().environmentObject(state)
         )
     }
 

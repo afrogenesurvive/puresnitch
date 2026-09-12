@@ -32,6 +32,10 @@ final class AppState: ObservableObject {
     @Published var topProcesses: [ProcessStats] = []
     @Published var topDomains: [DomainStats] = []
     @Published var topCountries: [CountryStats] = []
+    @Published var audiences: [Audience] = []
+    @Published var audienceSummaries: [AudienceSummary] = []
+    @Published var proxyReport: ProxyExpectationReport?
+    @Published var selectedAudienceId: UUID?
     @Published var searchQuery: String = ""
 
     /// Menu-bar speed readout. Off by default: the status item is a plain
@@ -159,6 +163,109 @@ final class AppState: ObservableObject {
     func bootstrap() {
         helper.startMonitoring()
         refreshRules()
+        refreshAudit()
+    }
+
+    /// Audience list plus the declaration-vs-observation report. Both are cheap
+    /// and both are re-read on demand so the audit window never shows stale
+    /// routing facts.
+    func refreshAudit() {
+        helper.listAudiences { [weak self] audiences in
+            guard let self else { return }
+            self.audiences = audiences
+            Task { await self.recomputeAggregates() }
+        }
+        helper.proxyExpectationReport { [weak self] report in
+            self?.proxyReport = report
+        }
+    }
+
+    func rediscoverAudiences() {
+        helper.rediscoverAudiences { [weak self] audiences in
+            guard let self else { return }
+            self.audiences = audiences
+            self.refreshAudit()
+        }
+    }
+
+    /// "Watch this process": build a manual audience from an observed connection
+    /// so an agent or MCP server that no configuration names can still be pulled
+    /// into the audit.
+    @discardableResult
+    func watchProcess(of connection: Connection) -> Audience? {
+        var matchers: [AudienceMatcher] = []
+        if !connection.processPath.isEmpty {
+            matchers.append(AudienceMatcher(kind: .processPathPrefix, pattern: connection.processPath))
+        }
+        if let cwd = connection.processCwd, !cwd.isEmpty {
+            matchers.append(AudienceMatcher(kind: .cwdPrefix, pattern: cwd))
+        }
+        if let commandLine = connection.processCommandLine,
+           let token = Self.scriptToken(in: commandLine), !token.isEmpty {
+            matchers.append(AudienceMatcher(kind: .commandLineContains, pattern: token))
+        }
+        guard !matchers.isEmpty else {
+            appendLog(level: "error", message: "This connection exposes no process detail to watch yet.")
+            return nil
+        }
+
+        let base = "watch:" + (connection.processName.isEmpty ? "unknown" : connection.processName)
+        let audience = Audience(
+            name: uniqueAudienceName(base),
+            icon: "eye",
+            kind: .adHoc,
+            source: .manual,
+            matchers: matchers,
+            notes: "Created from the connection list"
+        )
+        guard (try? audience.validateForPersistence()) != nil else {
+            appendLog(level: "error", message: "The watched process could not be turned into an audience.")
+            return nil
+        }
+        audiences.append(audience)          // optimistic: the list updates even if the helper is down
+        helper.addAudience(audience)
+        selectedAudienceId = audience.id
+        refreshAudit()
+        return audience
+    }
+
+    func removeAudience(id: UUID) {
+        audiences.removeAll { $0.id == id }
+        audienceSummaries.removeAll { $0.id == id }
+        if selectedAudienceId == id { selectedAudienceId = nil }
+        helper.removeAudience(id: id)
+        refreshAudit()
+    }
+
+    func setAudienceEnabled(id: UUID, enabled: Bool) {
+        if let index = audiences.firstIndex(where: { $0.id == id }) {
+            audiences[index].enabled = enabled
+        }
+        helper.setAudienceEnabled(id: id, enabled: enabled)
+        refreshAudit()
+    }
+
+    /// The script an interpreter was asked to run, which is what identifies an
+    /// MCP server: `node .../mcp/sample/index.js` shares its executable with
+    /// every other node process on the machine.
+    static func scriptToken(in commandLine: String) -> String? {
+        let scripts = [".js", ".mjs", ".cjs", ".ts", ".py", ".rb", ".sh"]
+        for token in commandLine.split(separator: " ") {
+            let candidate = String(token)
+            guard candidate.hasPrefix("/"), scripts.contains(where: { candidate.hasSuffix($0) }) else { continue }
+            return candidate
+        }
+        return nil
+    }
+
+    private func uniqueAudienceName(_ base: String) -> String {
+        let taken = Set(audiences.map(\.name))
+        guard taken.contains(base) else { return base }
+        for suffix in 2...99 {
+            let candidate = "\(base) \(suffix)"
+            if !taken.contains(candidate) { return candidate }
+        }
+        return base
     }
 
     func refreshRules() {
@@ -269,6 +376,7 @@ final class AppState: ObservableObject {
 
     func recomputeAggregates() async {
         let conns = self.connections
+        let knownAudiences = self.audiences
         var byProc: [String: (Int64, Int64, NSImage?)] = [:]
         var byDom: [String: (Int64, Int64)] = [:]
         var byCountry: [String: (String, Int64, Int64)] = [:]
@@ -293,6 +401,39 @@ final class AppState: ObservableObject {
         topCountries = byCountry.map { (cc, v) in
             CountryStats(id: cc, country: v.0, countryCode: cc, bytesIn: v.1, bytesOut: v.2)
         }.sorted { $0.total > $1.total }.prefix(20).map { $0 }
+
+        // Live per-audience rollup. Audiences with no traffic are still listed:
+        // "declared but silent" is exactly what an audit needs to see.
+        var byAudience: [UUID: (count: Int, bytesIn: Int64, bytesOut: Int64, proxied: Int, first: Date?, last: Date?)] = [:]
+        for c in conns {
+            guard let id = c.audienceId else { continue }
+            var entry = byAudience[id] ?? (0, 0, 0, 0, nil, nil)
+            entry.count += 1
+            entry.bytesIn += c.bytesIn
+            entry.bytesOut += c.bytesOut
+            if c.remotePort == AppConstants.devmonProxyPort { entry.proxied += 1 }
+            entry.first = min(entry.first ?? c.firstSeen, c.firstSeen)
+            entry.last = max(entry.last ?? c.lastSeen, c.lastSeen)
+            byAudience[id] = entry
+        }
+        audienceSummaries = knownAudiences.map { audience in
+            let stats = byAudience[audience.id]
+            return AudienceSummary(
+                id: audience.id,
+                name: audience.name,
+                kind: audience.kind,
+                icon: audience.icon,
+                connectionCount: stats?.count ?? 0,
+                bytesIn: stats?.bytesIn ?? 0,
+                bytesOut: stats?.bytesOut ?? 0,
+                proxiedCount: stats?.proxied ?? 0,
+                firstSeen: stats?.first,
+                lastSeen: stats?.last
+            )
+        }.sorted { lhs, rhs in
+            if lhs.total != rhs.total { return lhs.total > rhs.total }
+            return lhs.name < rhs.name
+        }
     }
 
 }

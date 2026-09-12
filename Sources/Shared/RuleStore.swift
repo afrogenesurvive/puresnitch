@@ -71,7 +71,13 @@ public final class RuleStore: @unchecked Sendable {
             latitude REAL,
             longitude REAL,
             first_seen REAL,
-            last_seen REAL
+            last_seen REAL,
+            audience_id TEXT,
+            audience_name TEXT,
+            repo_root TEXT,
+            process_cwd TEXT,
+            provider TEXT,
+            process_command_line TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_conn_status ON connections(status);
         CREATE INDEX IF NOT EXISTS idx_conn_pid ON connections(pid);
@@ -98,8 +104,23 @@ public final class RuleStore: @unchecked Sendable {
             key TEXT PRIMARY KEY,
             value TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS audiences (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            icon TEXT,
+            kind TEXT,
+            source TEXT,
+            mode TEXT,
+            enabled INTEGER,
+            matchers_json TEXT,
+            notes TEXT,
+            created_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audiences_source ON audiences(source);
         """
         try exec(ddl)
+        try migrateConnectionColumns()
         try seedProfiles()
         try seedBlocklists()
         try migrateDefaultBlocklistURLs()
@@ -318,8 +339,9 @@ public final class RuleStore: @unchecked Sendable {
         INSERT INTO connections(
             id,pid,process_name,process_path,process_bundle_id,local_port,remote_host,remote_ip,
             remote_port,direction,status,protocol_name,bytes_in,bytes_out,country,country_code,
-            latitude,longitude,first_seen,last_seen
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            latitude,longitude,first_seen,last_seen,
+            audience_id,audience_name,repo_root,process_cwd,provider,process_command_line
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             pid=excluded.pid,
             process_name=excluded.process_name,
@@ -339,7 +361,16 @@ public final class RuleStore: @unchecked Sendable {
             latitude=excluded.latitude,
             longitude=excluded.longitude,
             first_seen=MIN(connections.first_seen, excluded.first_seen),
-            last_seen=MAX(connections.last_seen, excluded.last_seen);
+            last_seen=MAX(connections.last_seen, excluded.last_seen),
+            -- Attribution is derived, and a later snapshot of the same session can
+            -- legitimately arrive without it (resolver miss). COALESCE keeps the
+            -- last known good value instead of blanking the row.
+            audience_id=COALESCE(excluded.audience_id, connections.audience_id),
+            audience_name=COALESCE(excluded.audience_name, connections.audience_name),
+            repo_root=COALESCE(excluded.repo_root, connections.repo_root),
+            process_cwd=COALESCE(excluded.process_cwd, connections.process_cwd),
+            provider=COALESCE(excluded.provider, connections.provider),
+            process_command_line=COALESCE(excluded.process_command_line, connections.process_command_line);
         """
         try queue.sync {
             try exec("BEGIN IMMEDIATE;")
@@ -395,6 +426,166 @@ public final class RuleStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - audiences
+
+    public func upsertAudience(_ audience: Audience) throws {
+        let sql = """
+        INSERT OR REPLACE INTO audiences(
+            id,name,icon,kind,source,mode,enabled,matchers_json,notes,created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?);
+        """
+        var encoded = "[]"
+        if let data = try? JSONEncoder().encode(audience.matchers),
+           let text = String(data: data, encoding: .utf8) {
+            encoded = text
+        }
+        try execute(sql) { stmt in
+            sqlite3_bind_text(stmt, 1, audience.id.uuidString, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, audience.name, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, audience.icon, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 4, audience.kind.rawValue, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 5, audience.source.rawValue, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 6, audience.mode.rawValue, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 7, audience.enabled ? 1 : 0)
+            sqlite3_bind_text(stmt, 8, encoded, -1, SQLITE_TRANSIENT)
+            bindOpt(stmt, 9, audience.notes)
+            sqlite3_bind_double(stmt, 10, audience.createdAt.timeIntervalSince1970)
+        }
+    }
+
+    /// Detaches history instead of deleting it: the connection rows are the audit
+    /// trail, and an audience can be recreated with the same matchers later.
+    public func deleteAudience(id: UUID) throws {
+        try execute("UPDATE connections SET audience_id=NULL, audience_name=NULL WHERE audience_id=?;") { stmt in
+            sqlite3_bind_text(stmt, 1, id.uuidString, -1, SQLITE_TRANSIENT)
+        }
+        try execute("DELETE FROM audiences WHERE id=?;") { stmt in
+            sqlite3_bind_text(stmt, 1, id.uuidString, -1, SQLITE_TRANSIENT)
+        }
+    }
+
+    public func setAudienceEnabled(id: UUID, enabled: Bool) throws {
+        try execute("UPDATE audiences SET enabled=? WHERE id=?;") { stmt in
+            sqlite3_bind_int(stmt, 1, enabled ? 1 : 0)
+            sqlite3_bind_text(stmt, 2, id.uuidString, -1, SQLITE_TRANSIENT)
+        }
+    }
+
+    public func allAudiences() -> [Audience] {
+        queue.sync {
+            var out: [Audience] = []
+            var stmt: OpaquePointer?
+            defer { if stmt != nil { sqlite3_finalize(stmt) } }
+            guard sqlite3_prepare_v2(db, "SELECT * FROM audiences ORDER BY name ASC;", -1, &stmt, nil) == SQLITE_OK else {
+                return []
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let audience = readAudience(stmt) { out.append(audience) }
+            }
+            return out
+        }
+    }
+
+    /// Per-audience rollup over stored connections. Audiences with no traffic are
+    /// still returned: "declared but unused" is exactly what an audit is looking
+    /// for, and a missing row would read as "no such audience".
+    public func audienceSummaries(proxyPort: Int = AppConstants.devmonProxyPort) -> [AudienceSummary] {
+        let audiences = allAudiences()
+        guard !audiences.isEmpty else { return [] }
+
+        var aggregates: [String: (count: Int, bytesIn: Int64, bytesOut: Int64, proxied: Int, first: Date?, last: Date?)] = [:]
+        queue.sync {
+            let sql = """
+            SELECT audience_id,
+                   COUNT(*),
+                   COALESCE(SUM(bytes_in),0),
+                   COALESCE(SUM(bytes_out),0),
+                   COALESCE(SUM(CASE WHEN remote_port = ? THEN 1 ELSE 0 END),0),
+                   MIN(first_seen),
+                   MAX(last_seen)
+            FROM connections
+            WHERE audience_id IS NOT NULL
+            GROUP BY audience_id;
+            """
+            var stmt: OpaquePointer?
+            defer { if stmt != nil { sqlite3_finalize(stmt) } }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            sqlite3_bind_int(stmt, 1, Int32(proxyPort))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let key = text(stmt, 0)
+                let first: Date? = sqlite3_column_type(stmt, 5) == SQLITE_NULL
+                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5))
+                let last: Date? = sqlite3_column_type(stmt, 6) == SQLITE_NULL
+                    ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
+                aggregates[key] = (
+                    Int(sqlite3_column_int(stmt, 1)),
+                    sqlite3_column_int64(stmt, 2),
+                    sqlite3_column_int64(stmt, 3),
+                    Int(sqlite3_column_int(stmt, 4)),
+                    first,
+                    last
+                )
+            }
+        }
+
+        return audiences.map { audience in
+            let aggregate = aggregates[audience.id.uuidString]
+            return AudienceSummary(
+                id: audience.id,
+                name: audience.name,
+                kind: audience.kind,
+                icon: audience.icon,
+                connectionCount: aggregate?.count ?? 0,
+                bytesIn: aggregate?.bytesIn ?? 0,
+                bytesOut: aggregate?.bytesOut ?? 0,
+                proxiedCount: aggregate?.proxied ?? 0,
+                firstSeen: aggregate?.first,
+                lastSeen: aggregate?.last
+            )
+        }.sorted { lhs, rhs in
+            if lhs.total != rhs.total { return lhs.total > rhs.total }
+            return lhs.name < rhs.name
+        }
+    }
+
+    public func recentAudienceActivity(audienceId: UUID, limit: Int = 200) -> [Connection] {
+        queue.sync {
+            var out: [Connection] = []
+            let safeLimit = min(max(limit, 0), Self.connectionHistoryLimit)
+            var stmt: OpaquePointer?
+            defer { if stmt != nil { sqlite3_finalize(stmt) } }
+            let sql = "SELECT * FROM connections WHERE audience_id=? ORDER BY last_seen DESC LIMIT ?;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            sqlite3_bind_text(stmt, 1, audienceId.uuidString, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int64(stmt, 2, Int64(safeLimit))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let c = readConn(stmt) { out.append(c) }
+            }
+            return out
+        }
+    }
+
+    private func readAudience(_ stmt: OpaquePointer?) -> Audience? {
+        guard let id = UUID(uuidString: text(stmt, 0)) else { return nil }
+        var matchers: [AudienceMatcher] = []
+        if let data = text(stmt, 7).data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([AudienceMatcher].self, from: data) {
+            matchers = decoded
+        }
+        return Audience(
+            id: id,
+            name: text(stmt, 1),
+            icon: text(stmt, 2),
+            kind: AudienceKind(rawValue: text(stmt, 3)) ?? .adHoc,
+            source: AudienceSource(rawValue: text(stmt, 4)) ?? .manual,
+            mode: AudienceMode(rawValue: text(stmt, 5)) ?? .observe,
+            enabled: sqlite3_column_int(stmt, 6) == 1,
+            matchers: matchers,
+            notes: textOpt(stmt, 8),
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9))
+        )
+    }
+
     public func setSetting(_ key: String, _ value: String) throws {
         try execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?);") { stmt in
             sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
@@ -437,7 +628,57 @@ public final class RuleStore: @unchecked Sendable {
         if let v = c.longitude { sqlite3_bind_double(stmt, 18, v) } else { sqlite3_bind_null(stmt, 18) }
         sqlite3_bind_double(stmt, 19, c.firstSeen.timeIntervalSince1970)
         sqlite3_bind_double(stmt, 20, c.lastSeen.timeIntervalSince1970)
+        bindOpt(stmt, 21, c.audienceId?.uuidString)
+        bindOpt(stmt, 22, c.audienceName)
+        bindOpt(stmt, 23, c.repoRoot)
+        bindOpt(stmt, 24, c.processCwd)
+        bindOpt(stmt, 25, c.provider)
+        bindOpt(stmt, 26, c.processCommandLine)
     }
+    /// `CREATE TABLE IF NOT EXISTS` never adds columns to a database that already
+    /// has the table, and this project has no migration framework, so new columns
+    /// are probed with `PRAGMA table_info` and appended in a fixed order. `SELECT
+    /// *` readers rely on that order matching the DDL above: both paths put the
+    /// audience columns directly after `last_seen`.
+    private func migrateConnectionColumns() throws {
+        let existing = connectionColumnNames()
+        let additions: [(name: String, type: String)] = [
+            ("audience_id", "TEXT"),
+            ("audience_name", "TEXT"),
+            ("repo_root", "TEXT"),
+            ("process_cwd", "TEXT"),
+            ("provider", "TEXT"),
+            ("process_command_line", "TEXT")
+        ]
+        var added = false
+        for addition in additions where !existing.contains(addition.name) {
+            try exec("ALTER TABLE connections ADD COLUMN \(addition.name) \(addition.type);")
+            added = true
+        }
+        if added || !existing.contains("audience_id") {
+            // Created here rather than in the DDL: on an upgraded database the
+            // column does not exist yet when the DDL runs, and indexing a
+            // missing column would abort setup.
+            try exec("CREATE INDEX IF NOT EXISTS idx_conn_audience ON connections(audience_id);")
+        }
+    }
+
+    /// Runs during `init`, before any concurrent access, so it reads the schema
+    /// without taking the queue.
+    private func connectionColumnNames() -> Set<String> {
+        var names: Set<String> = []
+        var stmt: OpaquePointer?
+        defer { if stmt != nil { sqlite3_finalize(stmt) } }
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(connections);", -1, &stmt, nil) == SQLITE_OK else {
+            return names
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let name = text(stmt, 1)
+            if !name.isEmpty { names.insert(name) }
+        }
+        return names
+    }
+
     private func pruneConnectionHistory() throws {
         try queue.sync { try pruneConnectionHistoryUnlocked() }
     }
@@ -517,6 +758,39 @@ public final class RuleStore: @unchecked Sendable {
         let lon: Double? = sqlite3_column_type(stmt, 17) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 17)
         let fs = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 18))
         let ls = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 19))
-        return Connection(id: id, pid: pid, processName: pname, processPath: ppath, processBundleId: bid, localPort: lp, remoteHost: host, remoteIP: ip, remotePort: rp, direction: dir, status: status, protocolName: proto, bytesIn: bin, bytesOut: bout, country: cn, countryCode: cc, latitude: lat, longitude: lon, firstSeen: fs, lastSeen: ls)
+        let audienceId = UUID(uuidString: text(stmt, 20))
+        let audienceName = textOpt(stmt, 21)
+        let repoRoot = textOpt(stmt, 22)
+        let processCwd = textOpt(stmt, 23)
+        let provider = textOpt(stmt, 24)
+        let processCommandLine = textOpt(stmt, 25)
+        return Connection(
+            id: id,
+            pid: pid,
+            processName: pname,
+            processPath: ppath,
+            processBundleId: bid,
+            localPort: lp,
+            remoteHost: host,
+            remoteIP: ip,
+            remotePort: rp,
+            direction: dir,
+            status: status,
+            protocolName: proto,
+            bytesIn: bin,
+            bytesOut: bout,
+            country: cn,
+            countryCode: cc,
+            latitude: lat,
+            longitude: lon,
+            firstSeen: fs,
+            lastSeen: ls,
+            audienceId: audienceId,
+            audienceName: audienceName,
+            repoRoot: repoRoot,
+            processCwd: processCwd,
+            provider: provider,
+            processCommandLine: processCommandLine
+        )
     }
 }

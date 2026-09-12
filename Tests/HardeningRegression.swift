@@ -2467,6 +2467,7 @@ private enum HardeningRegression {
             ("helper legacy reconciliation integration", testHelperLegacyReconciliationIntegration),
             ("database restore", testDatabaseRestore),
             ("connection history retention", testConnectionHistoryRetention),
+            ("audience attribution and persistence", testAudienceAttributionAndPersistence),
             ("pending DNS asks", testPendingDNSAsks),
             ("standalone PF cleanup gate", testStandalonePFCleanupGate),
             ("PF legacy reconciliation health", testPFLegacyReconciliationHealth),

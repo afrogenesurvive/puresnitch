@@ -251,6 +251,24 @@ public struct Connection: Identifiable, Codable, Hashable, Sendable {
     public var firstSeen: Date
     public var lastSeen: Date
 
+    // MARK: Audience attribution (audit)
+    /// Audience this connection was attributed to, if any. Optional so a payload
+    /// produced by a helper without audience support still decodes.
+    public var audienceId: UUID?
+    public var audienceName: String?
+    /// Git repository root derived from the process working directory.
+    public var repoRoot: String?
+    /// Working directory observed at capture time. This is a kernel fact, unlike
+    /// `repoRoot`, which is derived from it.
+    public var processCwd: String?
+    /// Provider classification (for example `openai`). Populated once DNS/SNI
+    /// capture lands: the lsof-only path sees addresses, not hostnames.
+    public var provider: String?
+    /// Executable plus arguments, truncated. `lsof` reports only the command
+    /// name, so this is what lets an audience distinguish a plain `node` from
+    /// `node .../mcp/sample/index.js`.
+    public var processCommandLine: String?
+
     public init(
         id: UUID = UUID(),
         pid: Int32,
@@ -271,7 +289,13 @@ public struct Connection: Identifiable, Codable, Hashable, Sendable {
         latitude: Double? = nil,
         longitude: Double? = nil,
         firstSeen: Date = Date(),
-        lastSeen: Date = Date()
+        lastSeen: Date = Date(),
+        audienceId: UUID? = nil,
+        audienceName: String? = nil,
+        repoRoot: String? = nil,
+        processCwd: String? = nil,
+        provider: String? = nil,
+        processCommandLine: String? = nil
     ) {
         self.id = id
         self.pid = pid
@@ -293,7 +317,213 @@ public struct Connection: Identifiable, Codable, Hashable, Sendable {
         self.longitude = longitude
         self.firstSeen = firstSeen
         self.lastSeen = lastSeen
+        self.audienceId = audienceId
+        self.audienceName = audienceName
+        self.repoRoot = repoRoot
+        self.processCwd = processCwd
+        self.provider = provider
+        self.processCommandLine = processCommandLine
     }
+}
+
+// MARK: - Audiences
+
+/// What kind of AI activity an audience represents. Presentation only: it
+/// groups the audit sidebar and never affects matching.
+public enum AudienceKind: String, Codable, CaseIterable, Sendable {
+    case client
+    case repo
+    case mcpServer
+    case service
+    case adHoc
+}
+
+/// Where an audience came from. Manual audiences always outrank discovered ones
+/// so a rescan can never shadow an edit the user made.
+public enum AudienceSource: String, Codable, CaseIterable, Sendable {
+    case autoDiscovered
+    case manual
+}
+
+/// Audiences are audit-only in this release. `observe` records traffic;
+/// `alert` is reserved for a later release. Neither blocks anything.
+///
+/// This is deliberately not a `RuleAction` case: adding one would change
+/// `RuleMatcher` and the generated `pf` anchor.
+public enum AudienceMode: String, Codable, CaseIterable, Sendable {
+    case observe
+    case alert
+}
+
+public enum AudienceMatcherKind: String, Codable, CaseIterable, Sendable {
+    /// Matches when the process executable path starts with the pattern.
+    case processPathPrefix
+    /// Matches the enclosing `.app` bundle identifier exactly.
+    case processBundleId
+    /// Matches when the process working directory starts with the pattern.
+    case cwdPrefix
+    /// Matches when the captured command line contains the pattern. This is how
+    /// an MCP server is identified: `lsof` sees `node`, and the server script
+    /// path only exists in the arguments.
+    case commandLineContains
+    /// Matches the remote host or address, globs allowed.
+    case remoteHost
+    /// Matches the remote port exactly.
+    case remotePort
+}
+
+/// One audience predicate.
+///
+/// Matchers in different groups are OR'd together, so an audience is the union
+/// of everything its groups name. Matchers sharing a non-nil `group` must all
+/// match, which is how "loopback host AND this port" is expressed without the
+/// host matcher alone swallowing every local connection.
+public struct AudienceMatcher: Codable, Hashable, Sendable {
+    public var kind: AudienceMatcherKind
+    public var pattern: String
+    public var group: String?
+    public init(kind: AudienceMatcherKind, pattern: String, group: String? = nil) {
+        self.kind = kind
+        self.pattern = pattern
+        self.group = group
+    }
+}
+
+public struct Audience: Identifiable, Codable, Hashable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var icon: String
+    public var kind: AudienceKind
+    public var source: AudienceSource
+    public var mode: AudienceMode
+    public var enabled: Bool
+    public var matchers: [AudienceMatcher]
+    public var notes: String?
+    public var createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        icon: String = "person.2",
+        kind: AudienceKind = .adHoc,
+        source: AudienceSource = .manual,
+        mode: AudienceMode = .observe,
+        enabled: Bool = true,
+        matchers: [AudienceMatcher] = [],
+        notes: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.icon = icon
+        self.kind = kind
+        self.source = source
+        self.mode = mode
+        self.enabled = enabled
+        self.matchers = matchers
+        self.notes = notes
+        self.createdAt = createdAt
+    }
+}
+
+public enum AudienceValidationError: Error, LocalizedError, Sendable {
+    case emptyName
+    case nameTooLong
+    case emptyPattern
+    case patternTooLong
+    case invalidPort
+    case invalidHost
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyName:
+            return "The audience name is empty."
+        case .nameTooLong:
+            return "The audience name is longer than 64 characters."
+        case .emptyPattern:
+            return "An audience matcher has an empty pattern."
+        case .patternTooLong:
+            return "An audience matcher pattern is longer than 512 characters."
+        case .invalidPort:
+            return "An audience port matcher must be a port number between 1 and 65535."
+        case .invalidHost:
+            return "An audience host matcher is not a supported DNS, IPv4, or CIDR pattern."
+        }
+    }
+}
+
+public extension Audience {
+    /// Patterns reach the root helper and are persisted beside the rule store,
+    /// so they get the same shape of validation `Rule` applies before storage.
+    func validateForPersistence() throws {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw AudienceValidationError.emptyName }
+        guard trimmedName.count <= 64 else { throw AudienceValidationError.nameTooLong }
+
+        for matcher in matchers {
+            let pattern = matcher.pattern
+            guard !pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AudienceValidationError.emptyPattern
+            }
+            guard pattern.count <= 512 else { throw AudienceValidationError.patternTooLong }
+            switch matcher.kind {
+            case .remotePort:
+                guard let port = Int(pattern), (1...65_535).contains(port) else {
+                    throw AudienceValidationError.invalidPort
+                }
+            case .remoteHost:
+                guard Rule.isValidRemoteHost(pattern) || Rule.isIPv6Address(pattern) else {
+                    throw AudienceValidationError.invalidHost
+                }
+            case .processPathPrefix, .processBundleId, .cwdPrefix, .commandLineContains:
+                break
+            }
+        }
+    }
+}
+
+/// Per-audience rollup for the audit UI. Computed on demand from stored
+/// connections; it is a report, not a persisted row.
+public struct AudienceSummary: Identifiable, Codable, Hashable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var kind: AudienceKind
+    public var icon: String
+    public var connectionCount: Int
+    public var bytesIn: Int64
+    public var bytesOut: Int64
+    /// Connections that reached the local dev_mon proxy port rather than the
+    /// provider directly, which is the difference between a billed, recorded
+    /// request and an invisible one.
+    public var proxiedCount: Int
+    public var firstSeen: Date?
+    public var lastSeen: Date?
+
+    public init(
+        id: UUID,
+        name: String,
+        kind: AudienceKind,
+        icon: String,
+        connectionCount: Int = 0,
+        bytesIn: Int64 = 0,
+        bytesOut: Int64 = 0,
+        proxiedCount: Int = 0,
+        firstSeen: Date? = nil,
+        lastSeen: Date? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.icon = icon
+        self.connectionCount = connectionCount
+        self.bytesIn = bytesIn
+        self.bytesOut = bytesOut
+        self.proxiedCount = proxiedCount
+        self.firstSeen = firstSeen
+        self.lastSeen = lastSeen
+    }
+
+    public var total: Int64 { bytesIn + bytesOut }
 }
 
 public struct Profile: Identifiable, Codable, Hashable, Sendable {
@@ -415,6 +645,11 @@ public struct AppConstants {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.1"
     public static let dnsProxyPort: UInt16 = 53
     public static let defaultDoHUpstream = "https://cloudflare-dns.com/dns-query"
+    /// Port dev_mon (DS-mon) proxies provider API calls on. Loopback traffic on
+    /// this port is "proxied" and recorded there; anything else is a direct
+    /// provider call that dev_mon never sees.
+    public static let devmonProxyPort = 18080
+    public static let ollamaPort = 11434
 
     public static var supportDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first

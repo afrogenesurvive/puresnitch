@@ -31,6 +31,19 @@ import Foundation
 
     func recentBlocked(limit: Int, reply: @escaping (Data) -> Void)
     func recentDenied(limit: Int, reply: @escaping (Data) -> Void)
+
+    // MARK: - Audience audit
+    /// Audiences are observation-only in this release: they attribute and
+    /// report traffic, and never change what is enforced.
+    func listAudiences(reply: @escaping (Data) -> Void)
+    func addAudience(audienceJSON: Data, reply: @escaping (Bool, String?) -> Void)
+    func removeAudience(idString: String, reply: @escaping (Bool, String?) -> Void)
+    func setAudienceEnabled(idString: String, enabled: Bool, reply: @escaping (Bool, String?) -> Void)
+    /// Re-runs discovery against the owner's configuration and returns the
+    /// refreshed list. Manual audiences are never modified by a rescan.
+    func rediscoverAudiences(reply: @escaping (Data) -> Void)
+    /// What clients declare about local proxies, compared with observed traffic.
+    func proxyExpectationReport(reply: @escaping (Data) -> Void)
 }
 
 @objc public protocol HelperClientProtocol {

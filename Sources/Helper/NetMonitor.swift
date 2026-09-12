@@ -60,6 +60,7 @@ final class NetMonitor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "io.moamenbasel.puresnitch.netmon", qos: .utility)
     private let connectionStateLock = NSLock()
     private var connectionTracker = ActiveConnectionTracker()
+    private let processResolver = ProcessResolver()
 
     var onConnections: (([Connection]) -> Void)?
     var onSample: ((TrafficSample) -> Void)?
@@ -159,21 +160,24 @@ final class NetMonitor: @unchecked Sendable {
         let remoteRaw = halves[1].hasPrefix(">") ? String(halves[1].dropFirst()) : halves[1]
         guard let (lip, lport) = splitHostPort(local) else { return nil }
         guard let (rip, rport) = splitHostPort(remoteRaw) else { return nil }
-        let path = pidPath(pid)
-        let bundle = bundleID(forPath: path)
+        // One cached lookup per PID replaces a `/bin/ps` spawn per connection.
+        let process = processResolver.info(forPID: pid, commandName: name)
+        let path = process.executablePath
         let normalizedProtocol = protocolName.isEmpty ? "tcp" : protocolName.lowercased()
         let connection = Connection(
             pid: pid,
             processName: name,
             processPath: path,
-            processBundleId: bundle,
+            processBundleId: process.bundleId,
             localPort: lport,
             remoteHost: rip,
             remoteIP: rip,
             remotePort: rport,
             direction: .outgoing,
             status: .established,
-            protocolName: normalizedProtocol
+            protocolName: normalizedProtocol,
+            processCwd: process.workingDirectory,
+            processCommandLine: process.commandLine
         )
         let identity = SocketIdentity(
             pid: pid,
@@ -201,27 +205,6 @@ final class NetMonitor: @unchecked Sendable {
         let host = String(s[s.startIndex..<lastColon])
         let portStr = s[s.index(after: lastColon)...]
         return (host, Int(portStr) ?? 0)
-    }
-
-    private func pidPath(_ pid: Int32) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-p", String(pid), "-o", "comm="]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-        do { try p.run() } catch { return "" }
-        p.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
-
-    private func bundleID(forPath path: String) -> String? {
-        guard !path.isEmpty else { return nil }
-        var p = path
-        if let r = p.range(of: ".app/", options: .backwards) { p = String(p[..<r.upperBound]) }
-        let plist = (p as NSString).appendingPathComponent("Contents/Info.plist")
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: plist)) else { return nil }
-        guard let d = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
-        return d["CFBundleIdentifier"] as? String
     }
 
     private func startNettop() {

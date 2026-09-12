@@ -1604,6 +1604,84 @@ final class HelperClient: NSObject, ObservableObject {
         remote?.startMonitoring { _, _ in }
     }
 
+    // MARK: - Audience audit
+
+    func listAudiences(completion: @MainActor @escaping ([Audience]) -> Void) {
+        guard let connection else { return }
+        let connectionEpoch = self.connectionEpoch
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in } as? HelperProtocol
+        guard let proxy else { return }
+        proxy.listAudiences { [weak self, weak connection] data in
+            guard let audiences = try? JSONDecoder().decode([Audience].self, from: data) else { return }
+            Task { @MainActor in
+                guard let self, let connection,
+                      connectionEpoch == self.connectionEpoch,
+                      self.connection === connection else { return }
+                completion(audiences)
+            }
+        }
+    }
+
+    func addAudience(_ audience: Audience) {
+        guard let data = try? JSONEncoder().encode(audience) else { return }
+        remote?.addAudience(audienceJSON: data) { [weak self] ok, message in
+            guard !ok else { return }
+            Task { @MainActor in
+                self?.state?.appendLog(level: "error", message: message ?? "The audience was not saved")
+            }
+        }
+    }
+
+    func removeAudience(id: UUID) {
+        remote?.removeAudience(idString: id.uuidString) { [weak self] ok, message in
+            guard !ok else { return }
+            Task { @MainActor in
+                self?.state?.appendLog(level: "error", message: message ?? "The audience was not removed")
+            }
+        }
+    }
+
+    func setAudienceEnabled(id: UUID, enabled: Bool) {
+        remote?.setAudienceEnabled(idString: id.uuidString, enabled: enabled) { [weak self] ok, message in
+            guard !ok else { return }
+            Task { @MainActor in
+                self?.state?.appendLog(level: "error", message: message ?? "The audience state was not saved")
+            }
+        }
+    }
+
+    func rediscoverAudiences(completion: @MainActor @escaping ([Audience]) -> Void) {
+        guard let connection else { return }
+        let connectionEpoch = self.connectionEpoch
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in } as? HelperProtocol
+        guard let proxy else { return }
+        proxy.rediscoverAudiences { [weak self, weak connection] data in
+            guard let audiences = try? JSONDecoder().decode([Audience].self, from: data) else { return }
+            Task { @MainActor in
+                guard let self, let connection,
+                      connectionEpoch == self.connectionEpoch,
+                      self.connection === connection else { return }
+                completion(audiences)
+            }
+        }
+    }
+
+    func proxyExpectationReport(completion: @MainActor @escaping (ProxyExpectationReport?) -> Void) {
+        guard let connection else { return }
+        let connectionEpoch = self.connectionEpoch
+        let proxy = connection.remoteObjectProxyWithErrorHandler { _ in } as? HelperProtocol
+        guard let proxy else { return }
+        proxy.proxyExpectationReport { [weak self, weak connection] data in
+            let report = try? JSONDecoder().decode(ProxyExpectationReport.self, from: data)
+            Task { @MainActor in
+                guard let self, let connection,
+                      connectionEpoch == self.connectionEpoch,
+                      self.connection === connection else { return }
+                completion(report)
+            }
+        }
+    }
+
     func refreshBlocklists() {
         remote?.refreshBlocklists { [weak self] ok, message in
             guard !ok else { return }

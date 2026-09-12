@@ -64,6 +64,7 @@ final class MenubarController {
     private func showContextMenu() {
         let menu = NSMenu()
         menu.addItem(makeItem("Network Monitor…", #selector(openMonitor), keyEq: "n"))
+        menu.addItem(makeItem("AI Activity…", #selector(openAudit), keyEq: "a"))
         menu.addItem(makeItem("Rules…", #selector(openRules), keyEq: "r"))
         menu.addItem(makeItem("Settings…", #selector(openSettings), keyEq: ","))
         menu.addItem(.separator())
@@ -89,6 +90,7 @@ final class MenubarController {
     }
 
     @objc private func openMonitor() { windows.showNetworkMonitor() }
+    @objc private func openAudit() { windows.showAudit() }
     @objc private func openRules() { windows.showRulesManager() }
     @objc private func openSettings() { windows.showSettings() }
     @objc private func modeAlert() { state.setMode(.alert) }
