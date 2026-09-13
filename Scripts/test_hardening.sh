@@ -33,6 +33,8 @@ xcrun --sdk macosx swiftc \
   "$repo_dir/Sources/Shared/Models.swift" \
   "$repo_dir/Sources/Shared/RuleMatcher.swift" \
   "$repo_dir/Sources/Shared/Logger.swift" \
+  "$repo_dir/Sources/Shared/MMDB.swift" \
+  "$repo_dir/Sources/Shared/IPGeo.swift" \
   "$repo_dir/Sources/Shared/RuleStore.swift" \
   "$repo_dir/Sources/Shared/AudienceMatcher.swift" \
   "$repo_dir/Sources/Shared/ProxyExpectation.swift" \
@@ -45,6 +47,7 @@ xcrun --sdk macosx swiftc \
   "$repo_dir/Sources/Helper/DNSProxy.swift" \
   "$repo_dir/Tests/ConnectionHistoryRegression.swift" \
   "$repo_dir/Tests/AudienceRegression.swift" \
+  "$repo_dir/Tests/GeoRegression.swift" \
   "$repo_dir/Tests/HardeningRegression.swift" \
   -lsqlite3 \
   -o "$test_dir/hardening-regression"

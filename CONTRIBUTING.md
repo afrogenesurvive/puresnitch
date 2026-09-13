@@ -8,9 +8,23 @@ Thanks for considering a contribution. The bar is: ship working code, keep the d
 git clone https://github.com/momenbasel/puresnitch.git
 cd puresnitch
 brew install xcodegen
+Scripts/fetch_geoip.sh
 xcodegen generate
 open PureSnitch.xcodeproj
 ```
+
+`Scripts/fetch_geoip.sh` downloads the DB-IP Lite IP-to-City database that
+PureSnitch uses for on-device geolocation. It is 121 MB, which is larger than
+GitHub's per-file limit, so it is gitignored rather than committed. Run it
+**before** `xcodegen generate`: the project's resource glob has to see the file
+in order to bundle it. Skipping it still builds and runs — connections simply
+have no country or coordinates, and the helper logs once to say so.
+
+The database is licensed CC BY 4.0 by DB-IP.com. Attribution is a condition of
+that licence, so keep the credit in Settings › About and in
+`Resources/GeoIP/ATTRIBUTION.md`. Bumping to a newer release means updating
+`DBIP_RELEASE`, `DBIP_SHA1` and `DBIP_MD5` together in `Scripts/fetch_geoip.sh`;
+the script verifies all three and refuses to install anything that does not match.
 
 The project file carries the maintainer's release-signing identity. For a
 certificate-free local build, use:

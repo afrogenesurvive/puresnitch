@@ -99,6 +99,25 @@ targets:
           else
             echo "warning: helper binary not found, skipping embed"
           fi
+
+          # The GeoIP database is gitignored (121 MB, over GitHub's per-file
+          # limit) and fetched by Scripts/fetch_geoip.sh. It is copied here
+          # rather than declared as a project resource on purpose: a resource
+          # reference makes the build FAIL when the file is absent, so a fresh
+          # clone could not build at all. Copying it means such a build simply
+          # has no geolocation, which is the documented degraded behaviour.
+          # Skipped when the copy is already current, so incremental builds do
+          # not rewrite 121 MB every time.
+          GEOIP_SRC="${SRCROOT}/Resources/GeoIP/dbip-city-lite.mmdb"
+          GEOIP_DEST="$APP/Contents/Resources/GeoIP/$(basename "$GEOIP_SRC")"
+          if [ -f "$GEOIP_SRC" ]; then
+            if [ ! -f "$GEOIP_DEST" ] || [ "$GEOIP_SRC" -nt "$GEOIP_DEST" ]; then
+              mkdir -p "$APP/Contents/Resources/GeoIP"
+              cp -f "$GEOIP_SRC" "$GEOIP_DEST"
+            fi
+          else
+            echo "warning: GeoIP database not found - geolocation will be unavailable. Run Scripts/fetch_geoip.sh and rebuild."
+          fi
     dependencies:
       - target: PureSnitchHelper
         embed: false

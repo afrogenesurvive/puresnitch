@@ -65,6 +65,17 @@ final class NetMonitor: @unchecked Sendable {
     var onConnections: (([Connection]) -> Void)?
     var onSample: ((TrafficSample) -> Void)?
 
+    /// Stamps country and coordinates onto every snapshot. Injected rather than
+    /// built here, so the helper owns the user's preference and the regression
+    /// binary can run without a database. The default is a disabled collector,
+    /// which keeps `NetMonitor()` behaving exactly as it did before geolocation
+    /// existed.
+    let geolocator: ConnectionGeolocator
+
+    init(geolocator: ConnectionGeolocator = ConnectionGeolocator(database: nil, enabled: false)) {
+        self.geolocator = geolocator
+    }
+
     private var lastIn: Int64 = 0
     private var lastOut: Int64 = 0
     private var lastSampleTime = Date()
@@ -142,7 +153,12 @@ final class NetMonitor: @unchecked Sendable {
         connectionStateLock.lock()
         let conns = connectionTracker.reconcile(observations, seenAt: Date())
         connectionStateLock.unlock()
-        onConnections?(conns)
+        // Deliberately AFTER reconcile: `reconcile` rebuilds each Connection from
+        // the current observation and carries only `id`/`firstSeen` forward, so
+        // anything stamped before it would be discarded on the next poll. It is
+        // also outside the lock - the lookup is a cached, in-process walk of a
+        // memory-mapped file, and it must never hold up the tracker.
+        onConnections?(geolocator.annotate(conns))
     }
 
     private func parseN(

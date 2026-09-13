@@ -150,8 +150,50 @@ The pre-migration `/etc/pf.conf.puresnitch.bak` is retained for manual recovery.
 ## Per-process observation
 
 - `nettop -P -L 0 -x -J bytes_in,bytes_out -s 1` runs continuously. Each line update is parsed for process-level throughput which feeds the menubar histogram and Network Monitor process list.
-- `lsof -i -n -P -F pcnPT` is polled every 2 s. Output is parsed into `Connection` records with PID, process path, transport, local/remote IP+port, and an inferred bundle ID (via Info.plist of the enclosing `.app`). A continuously observed socket keeps one database row; a gap starts a new session, and history is capped at the newest 5,000 rows. These snapshots do not carry per-connection byte totals, and v0.2.1 does not perform live IP geolocation.
+- `lsof -i -n -P -F pcnPT` is polled every 2 s. Output is parsed into `Connection` records with PID, process path, transport, local/remote IP+port, and an inferred bundle ID (via Info.plist of the enclosing `.app`). A continuously observed socket keeps one database row; a gap starts a new session, and history is capped at the newest 5,000 rows. These snapshots do not carry per-connection byte totals. (v0.2.1 also performed no IP geolocation; locations are attributed on-device in the version in development - see below.)
 - Process identity is enriched by `Helper/ProcessResolver.swift`, which caches the executable path, working directory, bundle ID and command line per PID. One cached lookup replaces a `/bin/ps` spawn per connection per poll.
+
+## Geolocation (on-device)
+
+Locations are resolved locally. There is no geolocation API call anywhere in the
+codebase, and no observed address ever leaves the machine.
+
+- The data is a DB-IP Lite IP-to-City `.mmdb` file (CC BY 4.0, attribution in
+  Settings › About), read by `Sources/Shared/MMDB.swift` - a small vendored
+  MaxMind-format reader. It is vendored rather than taken as a package because
+  `Scripts/test_hardening.sh` compiles a fixed file list with `swiftc` and links
+  only `-lsqlite3`, so a package graph would have to be taught to that script.
+- At 121 MB the file exceeds GitHub's per-file limit, so it is **not committed**.
+  `Scripts/fetch_geoip.sh` downloads it, verifies the pinned SHA1 and MD5, and
+  installs `Resources/GeoIP/dbip-city-lite.mmdb`, which is gitignored. CI caches
+  it, and the release scripts assert it is present in the signed bundle and in
+  the DMG so a release cannot ship without it.
+- The helper loads the file at startup and memory-maps it, so the cost is a
+  mapping rather than a read of 121 MB. `ConnectionGeolocator` then stamps
+  `country`, `countryCode`, `city`, `latitude` and `longitude` onto each
+  snapshot, and an in-process cache keeps repeat lookups off the tree walk.
+- Enrichment happens **after** `ActiveConnectionTracker.reconcile`. That order is
+  load-bearing: `reconcile` rebuilds every `Connection` from the current
+  observation and carries forward only `id`/`firstSeen`, so annotating earlier
+  would discard every location on the next poll. A regression test asserts it.
+- Private, loopback, link-local, CGNAT, multicast, ULA and documentation ranges
+  are filtered before lookup, so LAN addresses never surface as places.
+- `country`, `countryCode`, `latitude` and `longitude` were already present in
+  the `connections` DDL, the `INSERT` and the `SELECT *` reader, so only the
+  values were missing. `city` is new, and is appended **last** in both the DDL
+  and `migrateConnectionColumns()` rather than beside the other geo columns: a
+  `SELECT *` reader matches columns by position, so putting it anywhere else
+  would silently shift every column after it instead of failing.
+- `HelperStatus.geoLookupEnabled` and `geoDatabaseAvailable` drive a Settings
+  toggle. The preference is a `geo_lookup_enabled` row in the helper's `settings`
+  table and defaults to **on** when absent, because a local lookup needs nothing
+  to be opted into first.
+- A build without the database degrades to "no locations": the helper logs once
+  and keeps monitoring. That is the state of every CI run and of a fresh clone
+  before the fetch script is run.
+
+`README.md`, `docs/README.*.md` and `docs/index.html` still describe the shipped
+v0.2.1 release, which performs no geolocation at all.
 
 ## AI Activity audit (observation only)
 

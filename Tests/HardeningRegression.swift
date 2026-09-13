@@ -282,7 +282,9 @@ private func testHelperStatusCompatibility() throws {
         dnsProxyActive: true,
         dnsProxyPort: 53,
         activeRules: 7,
-        blockedToday: 3
+        blockedToday: 3,
+        geoLookupEnabled: true,
+        geoDatabaseAvailable: true
     )
     let roundTrip = try JSONDecoder().decode(HelperStatus.self, from: JSONEncoder().encode(status))
     try require(roundTrip.mode == .silentDeny, "HelperStatus mode was lost during Codable round-trip")
@@ -294,6 +296,10 @@ private func testHelperStatusCompatibility() throws {
     )
     try require(roundTrip.version == status.version, "HelperStatus version changed during round-trip")
     try require(roundTrip.pfctlActive && roundTrip.dnsProxyActive, "HelperStatus enforcement flags changed")
+    try require(
+        roundTrip.geoLookupEnabled && roundTrip.geoDatabaseAvailable,
+        "geolocation flags were lost during Codable round-trip"
+    )
 
     let legacyJSON = Data(
         """
@@ -315,6 +321,17 @@ private func testHelperStatusCompatibility() throws {
     try require(
         !legacy.legacyPFReconciliationSucceeded,
         "legacy HelperStatus should default PF reconciliation health to false"
+    )
+    // A helper that predates geolocation sends neither field. Defaulting to
+    // false is what lets the Settings row say "unavailable" rather than showing
+    // an enabled toggle for a feature the helper cannot service.
+    try require(
+        !legacy.geoLookupEnabled,
+        "legacy HelperStatus should default geolocation to disabled"
+    )
+    try require(
+        !legacy.geoDatabaseAvailable,
+        "legacy HelperStatus should default the geolocation database to unavailable"
     )
 }
 
@@ -2590,6 +2607,12 @@ private enum HardeningRegression {
             ("DNS loopback isolation and cleanup", testDNSProxyIsolationAndCleanup),
             ("DNS start/stop race", testDNSProxyStartStopRace),
             ("menubar theme and panel wiring", testMenubarThemeAndPanelWiring),
+            ("geo address parsing", testGeoAddressParsing),
+            ("geo routability filtering", testGeoRoutabilityFiltering),
+            ("geo lookup degrades without database", testGeoLookupDegradesWithoutDatabase),
+            ("geo setting encoding", testGeoSettingEncoding),
+            ("geo columns round trip through store", testGeoColumnsRoundTripThroughStore),
+            ("geo enrichment runs after reconcile", testGeoEnrichmentRunsAfterReconcile),
         ]
 
         var failures: [String] = []

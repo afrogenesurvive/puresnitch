@@ -77,7 +77,12 @@ public final class RuleStore: @unchecked Sendable {
             repo_root TEXT,
             process_cwd TEXT,
             provider TEXT,
-            process_command_line TEXT
+            process_command_line TEXT,
+            -- Appended last deliberately: the migration adds this with an ALTER,
+            -- and the SELECT * reader depends on the DDL order matching that
+            -- append order. Putting it beside the other geo columns would shift
+            -- every index after it.
+            city TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_conn_status ON connections(status);
         CREATE INDEX IF NOT EXISTS idx_conn_pid ON connections(pid);
@@ -340,8 +345,8 @@ public final class RuleStore: @unchecked Sendable {
             id,pid,process_name,process_path,process_bundle_id,local_port,remote_host,remote_ip,
             remote_port,direction,status,protocol_name,bytes_in,bytes_out,country,country_code,
             latitude,longitude,first_seen,last_seen,
-            audience_id,audience_name,repo_root,process_cwd,provider,process_command_line
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            audience_id,audience_name,repo_root,process_cwd,provider,process_command_line,city
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             pid=excluded.pid,
             process_name=excluded.process_name,
@@ -370,7 +375,13 @@ public final class RuleStore: @unchecked Sendable {
             repo_root=COALESCE(excluded.repo_root, connections.repo_root),
             process_cwd=COALESCE(excluded.process_cwd, connections.process_cwd),
             provider=COALESCE(excluded.provider, connections.provider),
-            process_command_line=COALESCE(excluded.process_command_line, connections.process_command_line);
+            process_command_line=COALESCE(excluded.process_command_line, connections.process_command_line),
+            -- Deliberately NOT COALESCE, unlike the attribution columns above:
+            -- a location mirrors the snapshot it came from. That is how country,
+            -- latitude and longitude already behave, and it is what makes
+            -- switching geolocation off stop accruing locations in the history
+            -- rather than quietly filling them in behind the user's back.
+            city=excluded.city;
         """
         try queue.sync {
             try exec("BEGIN IMMEDIATE;")
@@ -634,6 +645,7 @@ public final class RuleStore: @unchecked Sendable {
         bindOpt(stmt, 24, c.processCwd)
         bindOpt(stmt, 25, c.provider)
         bindOpt(stmt, 26, c.processCommandLine)
+        bindOpt(stmt, 27, c.city)
     }
     /// `CREATE TABLE IF NOT EXISTS` never adds columns to a database that already
     /// has the table, and this project has no migration framework, so new columns
@@ -648,7 +660,10 @@ public final class RuleStore: @unchecked Sendable {
             ("repo_root", "TEXT"),
             ("process_cwd", "TEXT"),
             ("provider", "TEXT"),
-            ("process_command_line", "TEXT")
+            ("process_command_line", "TEXT"),
+            // Keep this last. This list IS the append order that `SELECT *`
+            // readers depend on, and it has to match the DDL above.
+            ("city", "TEXT")
         ]
         var added = false
         for addition in additions where !existing.contains(addition.name) {
@@ -764,6 +779,7 @@ public final class RuleStore: @unchecked Sendable {
         let processCwd = textOpt(stmt, 23)
         let provider = textOpt(stmt, 24)
         let processCommandLine = textOpt(stmt, 25)
+        let city = textOpt(stmt, 26)
         return Connection(
             id: id,
             pid: pid,
@@ -783,6 +799,7 @@ public final class RuleStore: @unchecked Sendable {
             countryCode: cc,
             latitude: lat,
             longitude: lon,
+            city: city,
             firstSeen: fs,
             lastSeen: ls,
             audienceId: audienceId,

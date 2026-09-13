@@ -7,6 +7,7 @@ public enum PSLog {
     public static let dns = OSLog(subsystem: "io.moamenbasel.puresnitch", category: "dns")
     public static let pf = OSLog(subsystem: "io.moamenbasel.puresnitch", category: "pf")
     public static let netmon = OSLog(subsystem: "io.moamenbasel.puresnitch", category: "netmon")
+    public static let geo = OSLog(subsystem: "io.moamenbasel.puresnitch", category: "geo")
 
     public static func info(_ log: OSLog, _ msg: String) { os_log("%{public}@", log: log, type: .info, msg) }
     public static func error(_ log: OSLog, _ msg: String) { os_log("%{public}@", log: log, type: .error, msg) }

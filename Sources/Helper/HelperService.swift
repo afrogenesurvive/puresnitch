@@ -11,7 +11,7 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     private let store: RuleStore
     private let pf = PFManager()
     private let dns = DNSProxy()
-    private let netmon = NetMonitor()
+    private let netmon: NetMonitor
     /// Derives the git repository behind a process working directory so a bare
     /// `node`/`python` agent can be attributed to the project it runs in.
     private let repoLocator = RepoLocator()
@@ -66,6 +66,18 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         self.store = openedStore
         self.blocklists = BlocklistManager(store: openedStore)
         self.listener = listener
+        // Geolocation is settled once, here. The database is loaded from the app
+        // bundle (it is memory-mapped, so this costs nothing at startup) and the
+        // preference comes from the helper's own stored setting. NetMonitor holds
+        // it as a `let`, so the monitoring queue can annotate without a lock.
+        self.netmon = NetMonitor(
+            geolocator: ConnectionGeolocator(
+                database: IPGeoDatabase.loadDefault(),
+                enabled: ConnectionGeolocator.decodeEnabled(
+                    openedStore.getSetting(ConnectionGeolocator.enabledSettingKey)
+                )
+            )
+        )
         let persistedDesired = openedStore.getSetting(HelperSecurityState.desiredSettingKey)
         self.storedEnforcementDesired = try HelperSecurityState.decodeDesired(persistedDesired)
         self.enforcementDecisionPersisted = persistedDesired != nil
@@ -598,7 +610,9 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
             dnsProxyActive: dns.running,
             dnsProxyPort: Int(dns.port),
             activeRules: store.allRules(profile: "default").count,
-            blockedToday: dns.statistics.blocked
+            blockedToday: dns.statistics.blocked,
+            geoLookupEnabled: netmon.geolocator.isEnabled,
+            geoDatabaseAvailable: netmon.geolocator.isDatabaseLoaded
         )
         reply((try? JSONEncoder().encode(s)) ?? Data())
     }
@@ -898,6 +912,23 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
             reply(true, nil)
         } catch {
             reply(false, "DoH upstream was not saved: \(error)")
+        }
+    }
+
+    func setGeoLookupEnabled(_ enabled: Bool, reply: @escaping (Bool, String?) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(false, Self.unauthorizedMessage) }) else { return }
+        mutationLock.lock(); defer { mutationLock.unlock() }
+        do {
+            try store.setSetting(
+                ConnectionGeolocator.enabledSettingKey,
+                ConnectionGeolocator.encodeEnabled(enabled)
+            )
+            // The monitor reads this on its own queue; the flag is lock-guarded
+            // inside the collector, so there is no need to restart monitoring.
+            netmon.geolocator.isEnabled = enabled
+            reply(true, nil)
+        } catch {
+            reply(false, "Geolocation preference was not saved: \(error)")
         }
     }
 

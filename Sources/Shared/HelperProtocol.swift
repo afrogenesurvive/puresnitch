@@ -24,6 +24,10 @@ import Foundation
     func enableBlocklist(idString: String, enabled: Bool, reply: @escaping (Bool, String?) -> Void)
     func refreshBlocklists(reply: @escaping (Bool, String?) -> Void)
     func setDoHUpstream(url: String, reply: @escaping (Bool, String?) -> Void)
+    /// Turns on-device IP geolocation on or off. The lookup is entirely local -
+    /// no address ever leaves the machine - so this exists only so a user can
+    /// switch the country and city columns off.
+    func setGeoLookupEnabled(_ enabled: Bool, reply: @escaping (Bool, String?) -> Void)
 
     func installPF(reply: @escaping (Bool, String?) -> Void)
     func uninstallPF(reply: @escaping (Bool, String?) -> Void)

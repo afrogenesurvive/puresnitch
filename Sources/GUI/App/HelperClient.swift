@@ -1493,6 +1493,32 @@ final class HelperClient: NSObject, ObservableObject {
         refreshStatus()
     }
 
+    /// Fire-and-forget by design: the next status poll carries the authoritative
+    /// value back, so there is no generation or timeout bookkeeping here.
+    func setGeoLookupEnabled(_ enabled: Bool) {
+        guard let connection else { return }
+        let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] error in
+            Task { @MainActor in
+                self?.state?.appendLog(
+                    level: "error",
+                    message: "Geolocation preference did not reach the helper: \(error.localizedDescription)"
+                )
+            }
+        } as? HelperProtocol
+        proxy?.setGeoLookupEnabled(enabled) { [weak self] ok, message in
+            Task { @MainActor in
+                guard let self else { return }
+                if !ok {
+                    self.state?.appendLog(
+                        level: "error",
+                        message: message ?? "The helper refused the geolocation preference."
+                    )
+                }
+                self.refreshStatus()
+            }
+        }
+    }
+
     func setMode(_ m: AppMode) {
         modeRequestGeneration &+= 1
         invalidatePendingStatusRequest()

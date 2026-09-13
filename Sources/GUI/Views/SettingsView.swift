@@ -70,6 +70,27 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                Section("Geolocation") {
+                    Toggle(
+                        "Show country and city for connections",
+                        isOn: Binding(
+                            get: { state.geoLookupEnabled },
+                            set: { state.requestGeoLookupEnabled($0) }
+                        )
+                    )
+                        .disabled(
+                            !state.helperConnected
+                                || !state.helperStatusLoaded
+                                || !state.geoDatabaseAvailable
+                        )
+                    HStack {
+                        Text("Location database")
+                        Spacer()
+                        Text(geoDatabaseSummary).foregroundColor(.secondary)
+                    }
+                    Text("Lookups run entirely on this Mac against a database bundled with the app, so no address is ever sent anywhere. Country and city are approximate, and come from the DB-IP Lite database.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
                 Section("General") {
                     Toggle("Launch PureSnitch at login", isOn: $launchAtLogin)
                         .onChange(of: launchAtLogin) { newValue in setLaunchAtLogin(newValue) }
@@ -137,6 +158,12 @@ struct SettingsView: View {
         case (false, true): return "DNS proxy active; firewall inactive"
         case (false, false): return state.enforcementEnabled ? "Requested; waiting for helper" : "Inactive"
         }
+    }
+
+    private var geoDatabaseSummary: String {
+        if !state.helperConnected || !state.helperStatusLoaded { return "Loading helper status…" }
+        guard state.geoDatabaseAvailable else { return "Not included in this build" }
+        return state.geoLookupEnabled ? "On" : "Off"
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {
@@ -252,6 +279,10 @@ struct SettingsView: View {
                 .font(.caption)
             Text("MIT License · © 2026 Moamen Basel")
                 .font(.caption2).foregroundColor(.secondary)
+            // Required by the DB-IP Lite licence (CC BY 4.0): the attribution has
+            // to be visible to users, not merely present in the repository.
+            Link("IP geolocation by DB-IP", destination: URL(string: "https://db-ip.com")!)
+                .font(.caption2)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

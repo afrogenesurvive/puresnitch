@@ -104,6 +104,7 @@ for BIN in "$INSTALLED/Contents/MacOS/PureSnitch" "$INSTALLED/Contents/MacOS/Pur
   assert_universal "$BIN"
 done
 test -f "$INSTALLED/Contents/Resources/Assets.car" || fail "no Assets.car in the DMG"
+test -f "$INSTALLED/Contents/Resources/GeoIP/dbip-city-lite.mmdb" || fail "no GeoIP database in the DMG"
 assert_plist_metadata "$INSTALLED/Contents/Info.plist"
 assert_release_signature "$INSTALLED/Contents/MacOS/PureSnitchHelper"
 assert_release_signature "$INSTALLED"

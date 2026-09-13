@@ -248,6 +248,14 @@ public struct Connection: Identifiable, Codable, Hashable, Sendable {
     public var countryCode: String?
     public var latitude: Double?
     public var longitude: Double?
+    /// City name from the offline GeoIP database.
+    ///
+    /// Note where this sits in `connections`: LAST, not beside the other geo
+    /// columns. The migration appends it with an `ALTER TABLE`, and a `SELECT *`
+    /// reader depends on the DDL order matching that append order, so moving it
+    /// here would silently shift every column index after it. See
+    /// `RuleStore.migrateConnectionColumns()`.
+    public var city: String?
     public var firstSeen: Date
     public var lastSeen: Date
 
@@ -288,6 +296,7 @@ public struct Connection: Identifiable, Codable, Hashable, Sendable {
         countryCode: String? = nil,
         latitude: Double? = nil,
         longitude: Double? = nil,
+        city: String? = nil,
         firstSeen: Date = Date(),
         lastSeen: Date = Date(),
         audienceId: UUID? = nil,
@@ -315,6 +324,7 @@ public struct Connection: Identifiable, Codable, Hashable, Sendable {
         self.countryCode = countryCode
         self.latitude = latitude
         self.longitude = longitude
+        self.city = city
         self.firstSeen = firstSeen
         self.lastSeen = lastSeen
         self.audienceId = audienceId
@@ -564,7 +574,12 @@ public struct HelperStatus: Codable, Sendable {
     public let dnsProxyPort: Int
     public let activeRules: Int
     public let blockedToday: Int
-    public init(version: String, mode: AppMode, enforcementDesired: Bool, legacyPFMigrationPending: Bool, legacyPFReconciliationSucceeded: Bool, running: Bool, pfctlActive: Bool, dnsProxyActive: Bool, dnsProxyPort: Int, activeRules: Int, blockedToday: Int) {
+    /// On-device IP geolocation. The database ships inside the app, so these two
+    /// answer "does the user want it?" and "did the data file actually load?" -
+    /// a build made without Scripts/fetch_geoip.sh reports available == false.
+    public let geoLookupEnabled: Bool
+    public let geoDatabaseAvailable: Bool
+    public init(version: String, mode: AppMode, enforcementDesired: Bool, legacyPFMigrationPending: Bool, legacyPFReconciliationSucceeded: Bool, running: Bool, pfctlActive: Bool, dnsProxyActive: Bool, dnsProxyPort: Int, activeRules: Int, blockedToday: Int, geoLookupEnabled: Bool, geoDatabaseAvailable: Bool) {
         self.version = version
         self.mode = mode
         self.enforcementDesired = enforcementDesired
@@ -576,6 +591,8 @@ public struct HelperStatus: Codable, Sendable {
         self.dnsProxyPort = dnsProxyPort
         self.activeRules = activeRules
         self.blockedToday = blockedToday
+        self.geoLookupEnabled = geoLookupEnabled
+        self.geoDatabaseAvailable = geoDatabaseAvailable
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -590,6 +607,8 @@ public struct HelperStatus: Codable, Sendable {
         case dnsProxyPort
         case activeRules
         case blockedToday
+        case geoLookupEnabled
+        case geoDatabaseAvailable
     }
 
     public init(from decoder: Decoder) throws {
@@ -611,6 +630,10 @@ public struct HelperStatus: Codable, Sendable {
         dnsProxyPort = try container.decode(Int.self, forKey: .dnsProxyPort)
         activeRules = try container.decode(Int.self, forKey: .activeRules)
         blockedToday = try container.decode(Int.self, forKey: .blockedToday)
+        // Absent when the helper predates geolocation. Both defaulting to false
+        // is what lets the Settings row say "unavailable" rather than guessing.
+        geoLookupEnabled = try container.decodeIfPresent(Bool.self, forKey: .geoLookupEnabled) ?? false
+        geoDatabaseAvailable = try container.decodeIfPresent(Bool.self, forKey: .geoDatabaseAvailable) ?? false
     }
 }
 

@@ -89,6 +89,9 @@ test -f "$HELPER_BIN" || fail "privileged helper missing from the bundle"
 test -f "$APP_BUNDLE/Contents/Library/LaunchDaemons/io.moamenbasel.puresnitch.helper.plist" || fail "launchd plist missing"
 test -f "$APP_BUNDLE/Contents/Resources/Assets.car" || fail "Assets.car missing - the app would have no icon"
 test -f "$APP_BUNDLE/Contents/Resources/AppIcon.icns" || fail "AppIcon.icns missing"
+# Not tracked in git (121 MB), so this is the guard that stops a release being
+# signed and shipped without any geolocation data.
+test -f "$APP_BUNDLE/Contents/Resources/GeoIP/dbip-city-lite.mmdb" || fail "GeoIP database missing - run Scripts/fetch_geoip.sh, then rebuild"
 for BIN in "$APP_BUNDLE/Contents/MacOS/PureSnitch" "$HELPER_BIN"; do
   assert_universal "$BIN"
 done

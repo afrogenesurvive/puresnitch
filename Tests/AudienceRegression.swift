@@ -508,6 +508,7 @@ private func testConnectionColumnsMigrateFromLegacySchema() throws {
 
         let before = try connectionColumnNames(at: databaseURL.path)
         try requireAudience(!before.contains("audience_id"), "the legacy fixture already had audience columns")
+        try requireAudience(!before.contains("city"), "the legacy fixture already had a city column")
 
         do {
             let migrated = try RuleStore(path: databaseURL.path)
@@ -522,6 +523,17 @@ private func testConnectionColumnsMigrateFromLegacySchema() throws {
             try requireAudience(after.contains(column), "migration did not add \(column)")
             try requireAudience(after.filter { $0 == column }.count == 1, "migration added \(column) more than once")
         }
+
+        // `city` rides the same append path as the audience columns. Its position
+        // is the load-bearing part: the SELECT * reader matches columns by index,
+        // so a city added anywhere but last would silently shift every column
+        // after it rather than failing.
+        try requireAudience(after.contains("city"), "migration did not add city")
+        try requireAudience(after.filter { $0 == "city" }.count == 1, "migration added city more than once")
+        try requireAudience(
+            after.last == "city",
+            "city must be the last connections column, or SELECT * shifts every index"
+        )
 
         // Opening the same database again must be a no-op, not a duplicate ALTER.
         do {

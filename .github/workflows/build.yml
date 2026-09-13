@@ -13,6 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache GeoIP database
+        uses: actions/cache@v4
+        with:
+          path: Resources/GeoIP/dbip-city-lite.mmdb
+          key: geoip-${{ runner.os }}-dbip-city-lite-2026-09
+
+      # The city database is 121 MB, above GitHub's per-file limit, so it is
+      # gitignored and fetched here. The script verifies the pinned SHA1, so a
+      # stale or corrupted cache fails loudly instead of shipping wrong data.
+      - name: Fetch GeoIP database
+        run: Scripts/fetch_geoip.sh
+
       - name: Install xcodegen
         run: brew install xcodegen
 
@@ -42,12 +54,22 @@ jobs:
           test -f "$APP/Contents/MacOS/PureSnitchHelper"
           test -f "$APP/Contents/Library/LaunchDaemons/io.moamenbasel.puresnitch.helper.plist"
           test -f "$APP/Contents/Resources/Assets.car"
-          echo "App bundle structure OK (helper + app icon)"
+          test -f "$APP/Contents/Resources/GeoIP/dbip-city-lite.mmdb"
+          echo "App bundle structure OK (helper + app icon + geolocation database)"
 
   universal:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache GeoIP database
+        uses: actions/cache@v4
+        with:
+          path: Resources/GeoIP/dbip-city-lite.mmdb
+          key: geoip-${{ runner.os }}-dbip-city-lite-2026-09
+
+      - name: Fetch GeoIP database
+        run: Scripts/fetch_geoip.sh
 
       - name: Install xcodegen
         run: brew install xcodegen

@@ -26,6 +26,11 @@ final class AppState: ObservableObject {
     @Published var helperNeedsRepair: Bool = false
     @Published var pfctlEnabled: Bool = false
     @Published var dnsProxyEnabled: Bool = false
+    /// Helper-owned IP geolocation, mirrored from `HelperStatus`. `enabled` is
+    /// the user's preference; `available` is false when the build shipped
+    /// without the database, which the Settings row reports separately.
+    @Published var geoLookupEnabled: Bool = false
+    @Published var geoDatabaseAvailable: Bool = false
     @Published var enforcementRequestInFlight: Bool = false
     @Published var modeRequestInFlight: Bool = false
     @Published var logs: [LogEntry] = []
@@ -156,6 +161,8 @@ final class AppState: ObservableObject {
         pfctlEnabled = status.pfctlActive
         dnsProxyEnabled = status.dnsProxyActive
         enforcementEnabled = status.enforcementDesired
+        geoLookupEnabled = status.geoLookupEnabled
+        geoDatabaseAvailable = status.geoDatabaseAvailable
         if !helper.keepsEnforcementControlsLocked {
             enforcementRequestInFlight = false
         }
@@ -320,6 +327,16 @@ final class AppState: ObservableObject {
               !enforcementRequestInFlight else { return }
         modeRequestInFlight = true
         helper.setMode(m)
+    }
+
+    /// Geolocation is a display preference with no enforcement consequence, so
+    /// this is optimistic and has none of the generation/timeout machinery the
+    /// enforcement toggle needs: if the helper refuses, the next status poll
+    /// (every 3 s) puts the authoritative value back.
+    func requestGeoLookupEnabled(_ value: Bool) {
+        guard value != geoLookupEnabled else { return }
+        geoLookupEnabled = value
+        helper.setGeoLookupEnabled(value)
     }
 
     func updateConnections(_ conns: [Connection]) {

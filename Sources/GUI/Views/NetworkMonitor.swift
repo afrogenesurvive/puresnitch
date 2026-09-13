@@ -123,9 +123,7 @@ struct NetworkMonitorView: View {
     }
 
     private func legacyLabel(_ c: Connection) -> String {
-        if let country = c.country, !country.isEmpty { return country }
-        if !c.remoteHost.isEmpty { return c.remoteHost }
-        return c.remoteIP
+        connectionLocationLabel(c)
     }
 
     private var summaryPane: some View {
@@ -255,14 +253,30 @@ private struct ConnectionMapPane: View {
     var body: some View {
         Map(position: $cameraPosition) {
             ForEach(connections) { c in
-                Annotation(c.country ?? "?", coordinate: .init(latitude: c.latitude ?? 0, longitude: c.longitude ?? 0)) {
-                    NodePin(label: c.country ?? c.remoteHost)
+                Annotation(connectionLocationLabel(c), coordinate: .init(latitude: c.latitude ?? 0, longitude: c.longitude ?? 0)) {
+                    NodePin(label: connectionLocationLabel(c))
                 }
             }
         }
         .mapStyle(.standard(elevation: .flat, emphasis: .muted, pointsOfInterest: .excludingAll))
         .colorScheme(.dark)
     }
+}
+
+/// The one place a connection is turned into something a human reads.
+///
+/// A fallback chain rather than a single field, because the levels genuinely
+/// differ: `city` is present only when the database knows it, and a located
+/// connection can still be country-only. File-private so the map pane and the
+/// macOS 13 list cannot drift apart.
+private func connectionLocationLabel(_ c: Connection) -> String {
+    if let city = c.city, !city.isEmpty {
+        if let code = c.countryCode, !code.isEmpty { return "\(city), \(code)" }
+        return city
+    }
+    if let country = c.country, !country.isEmpty { return country }
+    if !c.remoteHost.isEmpty { return c.remoteHost }
+    return c.remoteIP
 }
 
 struct SmallStatRow: View {
