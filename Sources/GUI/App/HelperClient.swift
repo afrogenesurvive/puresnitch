@@ -1708,6 +1708,22 @@ final class HelperClient: NSObject, ObservableObject {
         }
     }
 
+    func connectionHistory(_ query: ConnectionQuery, completion: @escaping @MainActor ([Connection]) -> Void) {
+        guard let connection else { return }
+        let connectionEpoch = self.connectionEpoch
+        guard let data = try? JSONEncoder().encode(query),
+              let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in }) as? HelperProtocol else { return }
+        proxy.connectionHistory(queryJSON: data) { [weak self, weak connection] replyData in
+            let connections = (try? JSONDecoder().decode([Connection].self, from: replyData)) ?? []
+            Task { @MainActor in
+                guard let self, let connection,
+                      connectionEpoch == self.connectionEpoch,
+                      self.connection === connection else { return }
+                completion(connections)
+            }
+        }
+    }
+
     func refreshBlocklists() {
         remote?.refreshBlocklists { [weak self] ok, message in
             guard !ok else { return }
@@ -1837,6 +1853,14 @@ final class HelperEventReceiver: NSObject, HelperClientProtocol {
         Task { @MainActor in
             guard self.client?.isCurrentConnectionEpoch(self.connectionEpoch) == true else { return }
             self.state?.appendSample(sample)
+        }
+    }
+
+    func notifyProcessTraffic(processTrafficJSON: Data) {
+        guard let traffic = try? JSONDecoder().decode([ProcessTraffic].self, from: processTrafficJSON) else { return }
+        Task { @MainActor in
+            guard self.client?.isCurrentConnectionEpoch(self.connectionEpoch) == true else { return }
+            self.state?.updateProcessTraffic(traffic)
         }
     }
 

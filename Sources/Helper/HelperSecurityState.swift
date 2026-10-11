@@ -386,6 +386,7 @@ enum HelperSecurityState {
         let allowedObjects: Set<String> = Set(requiredColumns.keys).union([
             "idx_rules_profile", "idx_rules_process", "idx_rules_host",
             "idx_conn_status", "idx_conn_pid", "idx_conn_last_seen", "idx_conn_audience",
+            "idx_conn_process_last_seen",
             "idx_audiences_source",
         ])
         var statement: OpaquePointer?

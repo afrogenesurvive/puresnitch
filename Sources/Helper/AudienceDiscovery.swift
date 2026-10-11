@@ -16,6 +16,10 @@ struct AudienceDiscovery {
         var repositoryRoots: [URL]
         var applicationDirectories: [URL]
         var extraClientConfigurationURLs: [URL]
+        /// MCP server declarations outside VS Code: Cursor and Claude Desktop.
+        /// Per-workspace `<repo>/.vscode/mcp.json` files are discovered from the
+        /// repository roots instead of being listed here.
+        var mcpConfigurationURLs: [URL]
         var maximumRepositories: Int
         var maximumFileBytes: Int
 
@@ -37,6 +41,10 @@ struct AudienceDiscovery {
                     homeDirectory.appendingPathComponent(".config/opencode/opencode.jsonc"),
                     homeDirectory.appendingPathComponent(".codex/config.toml"),
                     homeDirectory.appendingPathComponent(".claude/settings.json"),
+                ],
+                mcpConfigurationURLs: [
+                    applicationSupport.appendingPathComponent("Claude/claude_desktop_config.json", isDirectory: false),
+                    homeDirectory.appendingPathComponent(".cursor/mcp.json", isDirectory: false),
                 ],
                 maximumRepositories: 200,
                 maximumFileBytes: 1 << 20
@@ -207,49 +215,109 @@ struct AudienceDiscovery {
         )
     }
 
-    /// One audience per MCP server declared in VS Code's `mcp.json`.
+    /// Every place an MCP server can be declared.
     ///
-    /// The launcher is `node`, and only the arguments name the server, so the
-    /// script path from `args` is the matcher. A server declared without an
-    /// absolute path (an `npx` package, for example) cannot be attributed and is
-    /// reported instead of guessed at.
+    /// VS Code's user-level `mcp.json` is long-standing; a per-workspace
+    /// `.vscode/mcp.json`, Cursor's `~/.cursor/mcp.json` and Claude Desktop's
+    /// `claude_desktop_config.json` are the other common homes. A server declared
+    /// in one of those was previously invisible to the audit entirely.
+    private func mcpConfigurationURLs() -> [URL] {
+        var urls: [URL] = [
+            configuration.codeUserDirectory.appendingPathComponent("mcp.json"),
+        ]
+        urls.append(contentsOf: configuration.mcpConfigurationURLs)
+        for root in configuration.repositoryRoots {
+            for repo in repositoryDirectories(under: root) {
+                urls.append(repo.appendingPathComponent(".vscode/mcp.json"))
+            }
+        }
+        return urls
+    }
+
+    /// One audience per MCP server, merged across every configuration that
+    /// declares it.
+    ///
+    /// The launcher is usually `node`/`npx`/`uvx`, and only the arguments name
+    /// the server, so a matcher is derived from the arguments. An absolute script
+    /// path is used directly; a launcher-declared package is matched by its
+    /// package name, because the spawned child runs the *resolved* package and
+    /// the literal argument never appears on its command line.
     private func mcpServerAudiences() -> (audiences: [Audience], warnings: [String]) {
-        var audiences: [Audience] = []
         var warnings: [String] = []
-        let url = configuration.codeUserDirectory.appendingPathComponent("mcp.json")
-        guard let data = read(url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let servers = root["servers"] as? [String: Any] else {
-            return (audiences, warnings)
+        var matchersByServer: [String: [AudienceMatcher]] = [:]
+        var order: [String] = []
+
+        for url in mcpConfigurationURLs() {
+            guard let data = read(url),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            // VS Code uses "servers"; Cursor and Claude Desktop use "mcpServers".
+            guard let servers = (root["servers"] as? [String: Any])
+                ?? (root["mcpServers"] as? [String: Any]) else { continue }
+
+            for name in servers.keys.sorted() {
+                guard let entry = servers[name] as? [String: Any] else { continue }
+                let arguments = (entry["args"] as? [Any])?.compactMap { $0 as? String } ?? []
+                var matchers: [AudienceMatcher] = []
+                for argument in arguments {
+                    let expanded = Self.expandPlaceholders(argument, home: configuration.homeDirectory)
+                    guard let pattern = Self.mcpMatchPattern(for: expanded) else { continue }
+                    if !matchers.contains(where: { $0.pattern == pattern }) {
+                        matchers.append(AudienceMatcher(kind: .commandLineContains, pattern: pattern))
+                    }
+                }
+                guard !matchers.isEmpty else {
+                    if matchersByServer[name] == nil {
+                        warnings.append(
+                            "mcp server '\(name)' in \(url.lastPathComponent) declares no identifiable path and cannot be attributed"
+                        )
+                    }
+                    continue
+                }
+                if matchersByServer[name] == nil { order.append(name) }
+                var merged = matchersByServer[name] ?? []
+                for matcher in matchers where !merged.contains(where: { $0.pattern == matcher.pattern }) {
+                    merged.append(matcher)
+                }
+                matchersByServer[name] = merged
+            }
         }
 
-        for name in servers.keys.sorted() {
-            guard let entry = servers[name] as? [String: Any] else { continue }
-            let arguments = (entry["args"] as? [Any])?.compactMap { $0 as? String } ?? []
-            var matchers: [AudienceMatcher] = []
-            for argument in arguments {
-                let expanded = Self.expandPlaceholders(argument, home: configuration.homeDirectory)
-                guard expanded.hasPrefix("/") else { continue }
-                if !matchers.contains(where: { $0.pattern == expanded }) {
-                    matchers.append(AudienceMatcher(kind: .commandLineContains, pattern: expanded))
-                }
-            }
-            guard !matchers.isEmpty else {
-                warnings.append("mcp server '\(name)' declares no absolute script path and cannot be attributed")
-                continue
-            }
-            audiences.append(
-                Audience(
-                    name: "mcp:\(name)",
-                    icon: "puzzlepiece",
-                    kind: .mcpServer,
-                    source: .autoDiscovered,
-                    matchers: matchers,
-                    notes: "MCP server declared in VS Code mcp.json"
-                )
+        let audiences = order.map { name in
+            Audience(
+                name: "mcp:\(name)",
+                icon: "puzzlepiece",
+                kind: .mcpServer,
+                source: .autoDiscovered,
+                matchers: matchersByServer[name] ?? [],
+                notes: "MCP server declared in a client configuration file"
             )
         }
         return (audiences, warnings)
+    }
+
+    /// The substring that identifies an MCP server's process on the command line.
+    ///
+    /// An absolute script path is matched directly. When the declaration uses a
+    /// launcher (`npx`, `uvx`) the spawned child runs the *resolved* package, so
+    /// the literal argument never appears on its command line — but the package
+    /// name (`@modelcontextprotocol/server-filesystem`) does. Matching that turns
+    /// an `npx` server from "cannot be attributed" into a real matcher.
+    static func mcpMatchPattern(for argument: String) -> String? {
+        if argument.hasPrefix("/") { return argument }
+        guard !argument.hasPrefix("-") else { return nil }
+        // Scoped npm package: @scope/name appears verbatim in the resolved path.
+        if argument.hasPrefix("@") { return argument }
+        // A path-shaped token (contains a separator but is not a bare/relative file).
+        if argument.contains("/"), !argument.hasPrefix("."), !argument.hasPrefix("~") {
+            return argument
+        }
+        // A bare package name such as `mcp-server-git`. Requiring a hyphen keeps
+        // ordinary words (a mode, a subcommand) from becoming false matchers.
+        if argument.contains("-"),
+           argument.range(of: "^[a-z0-9][a-z0-9._-]*$", options: .regularExpression) != nil {
+            return argument
+        }
+        return nil
     }
 
     private func localModelServerAudience() -> Audience? {

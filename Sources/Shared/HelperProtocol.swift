@@ -48,11 +48,18 @@ import Foundation
     func rediscoverAudiences(reply: @escaping (Data) -> Void)
     /// What clients declare about local proxies, compared with observed traffic.
     func proxyExpectationReport(reply: @escaping (Data) -> Void)
+    /// Stored connection history matching a filter (process, audience or time
+    /// window). Answers from the persisted audit trail, so a window that reaches
+    /// past the live snapshot is still complete.
+    func connectionHistory(queryJSON: Data, reply: @escaping (Data) -> Void)
 }
 
 @objc public protocol HelperClientProtocol {
     func notifyConnection(connectionJSON: Data)
     func notifyTraffic(sampleJSON: Data)
+    /// Per-process cumulative bytes from `nettop`. Pushed separately from
+    /// `notifyConnection` because it is keyed by PID, not by socket.
+    func notifyProcessTraffic(processTrafficJSON: Data)
     func notifyAlert(connectionJSON: Data, reply: @escaping (Bool, Bool) -> Void)
     func notifyLog(level: String, message: String)
 }

@@ -562,6 +562,62 @@ public struct TrafficSample: Codable, Sendable {
     }
 }
 
+/// Cumulative throughput for one process, sampled from `nettop`.
+///
+/// `nettop` counts bytes per *process*, not per socket, so this is the
+/// authoritative per-process figure. A connection inherits it through its PID
+/// rather than carrying a byte total of its own — the `lsof` snapshot has no
+/// byte counters at all. Anything that sums these across connections must count
+/// each PID once, or a process with several open sockets is multiplied.
+public struct ProcessTraffic: Codable, Hashable, Sendable, Identifiable {
+    public var pid: Int32
+    public var processName: String
+    public var bytesIn: Int64
+    public var bytesOut: Int64
+
+    public var id: Int32 { pid }
+    public var total: Int64 { bytesIn + bytesOut }
+
+    public init(pid: Int32, processName: String, bytesIn: Int64, bytesOut: Int64) {
+        self.pid = pid
+        self.processName = processName
+        self.bytesIn = bytesIn
+        self.bytesOut = bytesOut
+    }
+}
+
+/// A filter over stored connection history.
+///
+/// Every predicate is optional, so one query serves the live list, a single
+/// audience, and a process/time window. A nil `audienceId` with
+/// `onlyUnattributed == false` means "any audience"; `onlyUnattributed` selects
+/// rows that matched no audience at all, which is what the audit's unattributed
+/// row shows.
+public struct ConnectionQuery: Codable, Sendable {
+    public var processName: String?
+    public var audienceId: UUID?
+    public var onlyUnattributed: Bool
+    public var since: Date?
+    public var until: Date?
+    public var limit: Int
+
+    public init(
+        processName: String? = nil,
+        audienceId: UUID? = nil,
+        onlyUnattributed: Bool = false,
+        since: Date? = nil,
+        until: Date? = nil,
+        limit: Int = 500
+    ) {
+        self.processName = processName
+        self.audienceId = audienceId
+        self.onlyUnattributed = onlyUnattributed
+        self.since = since
+        self.until = until
+        self.limit = limit
+    }
+}
+
 public struct HelperStatus: Codable, Sendable {
     public let version: String
     public let mode: AppMode

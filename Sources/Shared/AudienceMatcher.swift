@@ -185,3 +185,52 @@ public struct AudienceResolver: Sendable {
         return candidate.name < current.name
     }
 }
+
+/// How a connection's repository is presented to a person.
+///
+/// The repository is derived from the process working directory, so it can only
+/// be named when that directory sits inside a git checkout. A process that runs
+/// with cwd `/` — every Electron helper, for instance — genuinely has none, and
+/// a bare dash hides why. Keeping the fallback in one place stops the audit
+/// window and any future surface from disagreeing about what "unknown" means.
+public enum RepositoryLabel: Equatable, Sendable {
+    case repository(String)
+    case directory(String)
+    case unknown
+
+    public init(connection: Connection) {
+        if let root = connection.repoRoot, !root.isEmpty {
+            self = .repository((root as NSString).lastPathComponent)
+        } else if let cwd = connection.processCwd, !cwd.isEmpty, cwd != "/" {
+            self = .directory((cwd as NSString).lastPathComponent)
+        } else {
+            self = .unknown
+        }
+    }
+
+    public var text: String {
+        switch self {
+        case .repository(let name): return name
+        case .directory(let name): return name
+        case .unknown: return "Unknown"
+        }
+    }
+
+    /// True only when the label names an actual repository, so the UI can
+    /// de-emphasise a best-effort working-directory name.
+    public var isRepository: Bool {
+        if case .repository = self { return true }
+        return false
+    }
+
+    public var help: String {
+        switch self {
+        case .repository:
+            return "Git repository derived from the process working directory."
+        case .directory(let name):
+            return "Working directory \(name) is not inside a git repository."
+        case .unknown:
+            return "The process working directory could not be read, so no repository is known."
+        }
+    }
+}

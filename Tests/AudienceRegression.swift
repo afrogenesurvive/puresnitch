@@ -973,6 +973,11 @@ private func testAudienceDiscoveryAgainstSyntheticHome() throws {
               "type": "stdio",
               "command": "npx",
               "args": ["-y", "@scope/server"]
+            },
+            "opaque": {
+              "type": "stdio",
+              "command": "foo",
+              "args": ["serve"]
             }
           }
         }
@@ -1002,9 +1007,10 @@ private func testAudienceDiscoveryAgainstSyntheticHome() throws {
 
         try requireAudience(names.contains("vscode-mcp"), "the MCP server directory audience was not discovered")
         try requireAudience(names.contains("mcp:sample"), "a declared MCP server did not get its own audience")
-        try requireAudience(!names.contains("mcp:npxy"), "an npx MCP server was guessed at instead of reported")
+        try requireAudience(names.contains("mcp:npxy"), "a launcher-declared MCP server was not discovered")
+        try requireAudience(!names.contains("mcp:opaque"), "an unattributable MCP server was guessed at instead of reported")
         try requireAudience(
-            result.warnings.contains { $0.contains("npxy") },
+            result.warnings.contains { $0.contains("opaque") },
             "an unattributable MCP server was not reported"
         )
         try requireAudience(names.contains("ollama"), "the local model server was not discovered")
@@ -1021,6 +1027,14 @@ private func testAudienceDiscoveryAgainstSyntheticHome() throws {
         try requireAudience(
             mcpSample.matchers.contains { $0.pattern == home.path + "/.vscode-mcp-servers/mcp/sample/index.js" },
             "the ${userHome} placeholder was not expanded"
+        )
+
+        // A launcher (`npx`) child runs the resolved package, so the literal
+        // argument never appears on its command line — the package name does.
+        let mcpNpxy = try requireAudienceUnwrap(result.audiences.first { $0.name == "mcp:npxy" }, "the npxy audience went missing")
+        try requireAudience(
+            mcpNpxy.matchers.contains { $0.pattern == "@scope/server" },
+            "the npx package name was not used as a matcher"
         )
 
         try requireAudience(
@@ -1107,6 +1121,52 @@ private func testAudienceSeederReconciliation() throws {
     )
 }
 
+private func testMCPMatchPattern() throws {
+    try requireAudience(
+        AudienceDiscovery.mcpMatchPattern(for: "/opt/srv/index.js") == "/opt/srv/index.js",
+        "an absolute script path was not matched"
+    )
+    try requireAudience(
+        AudienceDiscovery.mcpMatchPattern(for: "@scope/server") == "@scope/server",
+        "a scoped package was not matched"
+    )
+    try requireAudience(
+        AudienceDiscovery.mcpMatchPattern(for: "mcp-server-git") == "mcp-server-git",
+        "a hyphenated package name was not matched"
+    )
+    try requireAudience(AudienceDiscovery.mcpMatchPattern(for: "-y") == nil, "a launcher flag became a matcher")
+    try requireAudience(AudienceDiscovery.mcpMatchPattern(for: "serve") == nil, "an ordinary word became a matcher")
+    try requireAudience(AudienceDiscovery.mcpMatchPattern(for: "./local.js") == nil, "a relative path became a matcher")
+}
+
+private func testMCPDiscoveryFromAdditionalSources() throws {
+    try withSyntheticHome { home in
+        let cursor = home.appendingPathComponent(".cursor", isDirectory: true)
+        let claude = home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+        try writeFixture(
+            #"{ "mcpServers": { "cursor-server": { "command": "npx", "args": ["-y", "@acme/cursor-server"] } } }"#,
+            to: cursor.appendingPathComponent("mcp.json")
+        )
+        try writeFixture(
+            #"{ "mcpServers": { "claude-server": { "command": "uvx", "args": ["mcp-server-git"] } } }"#,
+            to: claude.appendingPathComponent("claude_desktop_config.json")
+        )
+
+        let result = AudienceDiscovery(configuration: syntheticConfiguration(home: home)).scan()
+        let names = Set(result.audiences.map(\.name))
+        try requireAudience(names.contains("mcp:cursor-server"), "a Cursor MCP server was not discovered")
+        try requireAudience(names.contains("mcp:claude-server"), "a Claude Desktop MCP server was not discovered")
+        let cursorAudience = try requireAudienceUnwrap(
+            result.audiences.first { $0.name == "mcp:cursor-server" },
+            "the Cursor audience went missing"
+        )
+        try requireAudience(
+            cursorAudience.matchers.contains { $0.pattern == "@acme/cursor-server" },
+            "the Cursor server package name was not used as a matcher"
+        )
+    }
+}
+
 // MARK: - entry point
 
 func testAudienceAttributionAndPersistence() throws {
@@ -1126,4 +1186,6 @@ func testAudienceAttributionAndPersistence() throws {
     try testAudienceDiscoveryAgainstSyntheticHome()
     try testAudienceDiscoveryRefusesEscapingSymlinks()
     try testAudienceSeederReconciliation()
+    try testMCPMatchPattern()
+    try testMCPDiscoveryFromAdditionalSources()
 }

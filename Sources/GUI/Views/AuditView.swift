@@ -6,6 +6,37 @@ import SwiftUI
 struct AuditView: View {
     @EnvironmentObject var state: AppState
     @State private var searchText = ""
+    @State private var timeWindow: TimeWindow = .all
+
+    /// How far back the activity table looks. Backed by the connection rows the
+    /// helper has already stored, so this is a filter over the audit trail, not a
+    /// separate query.
+    private enum TimeWindow: String, CaseIterable, Identifiable {
+        case hour = "1h"
+        case sixHours = "6h"
+        case day = "24h"
+        case all = "All"
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .hour: return "Past hour"
+            case .sixHours: return "Past 6 hours"
+            case .day: return "Past 24 hours"
+            case .all: return "All time"
+            }
+        }
+
+        var cutoff: Date? {
+            switch self {
+            case .hour: return Date().addingTimeInterval(-3_600)
+            case .sixHours: return Date().addingTimeInterval(-6 * 3_600)
+            case .day: return Date().addingTimeInterval(-24 * 3_600)
+            case .all: return nil
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,7 +56,11 @@ struct AuditView: View {
         }
         .background(PSTheme.bgPrimary)
         .preferredColorScheme(state.themeMode.colorScheme)
-        .onAppear { state.refreshAudit() }
+        .onAppear {
+            state.refreshAudit()
+            reloadHistory()
+        }
+        .onChange(of: timeWindow) { _ in reloadHistory() }
     }
 
     // MARK: - Sidebar
@@ -140,14 +175,17 @@ struct AuditView: View {
     // MARK: - Main pane
 
     private var mainPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                header
-                routingSection
-                activitySection
+        VStack(alignment: .leading, spacing: 14) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    header
+                    routingSection
+                }
             }
-            .padding(16)
+            .frame(maxHeight: 240)
+            activitySection
         }
+        .padding(16)
     }
 
     private var header: some View {
@@ -229,72 +267,143 @@ struct AuditView: View {
 
     private var activitySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(selectedAudience.map { "Activity · \($0.name)" } ?? "Unattributed traffic")
-                .font(.system(size: 11, weight: .semibold)).foregroundColor(PSTheme.textMuted)
+            HStack(spacing: 8) {
+                Text(selectedAudience.map { "Activity · \($0.name)" } ?? "Unattributed traffic")
+                    .font(.system(size: 11, weight: .semibold)).foregroundColor(PSTheme.textMuted)
+                Spacer()
+                if !selectedActivity.isEmpty {
+                    Text("\(visibleActivity.count) of \(selectedActivity.count)")
+                        .font(.system(size: 9)).foregroundColor(PSTheme.textMuted)
+                }
+                Picker("", selection: $timeWindow) {
+                    ForEach(TimeWindow.allCases) { window in
+                        Text(window.label).tag(window)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 120)
+                .help("Show only connections active within this window")
+            }
             if selectedActivity.isEmpty {
                 Text(state.selectedAudienceId == nil
                      ? "Every observed connection is attributed to an audience."
                      : "No observed connections for this audience yet.")
                     .font(.system(size: 10)).foregroundColor(PSTheme.textMuted)
+                Spacer()
+            } else if visibleActivity.isEmpty {
+                Text("No connections in this time window.")
+                    .font(.system(size: 10)).foregroundColor(PSTheme.textMuted)
+                Spacer()
             } else {
-                VStack(spacing: 0) {
-                    columnHeader
-                    ForEach(Array(selectedActivity.prefix(200).enumerated()), id: \.element.id) { index, connection in
-                        activityRow(connection, alternate: index % 2 == 1)
+                connectionsTable
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// A real `Table`: the user can resize and reorder the columns, and adding a
+    /// column costs one declaration. The process list in the Network Monitor is a
+    /// sidebar, so this is the only surface that needs a grid.
+    private var connectionsTable: some View {
+        Table(visibleActivity) {
+            TableColumn("Process") { connection in
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(connection.processName.isEmpty ? "Unknown" : connection.processName)
+                        .font(.system(size: 11)).foregroundColor(PSTheme.textPrimary).lineLimit(1)
+                    if let commandLine = connection.processCommandLine, !commandLine.isEmpty {
+                        Text(commandLine)
+                            .font(.system(size: 9)).foregroundColor(PSTheme.textMuted).lineLimit(1)
                     }
                 }
-                .background(PSTheme.bgRow)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-        }
-    }
+            .width(min: 140, ideal: 200)
 
-    private var columnHeader: some View {
-        HStack(spacing: 8) {
-            Text("Process").frame(width: 190, alignment: .leading)
-            Text("Repository").frame(width: 170, alignment: .leading)
-            Text("Remote").frame(maxWidth: .infinity, alignment: .leading)
-            Text("Seen").frame(width: 60, alignment: .trailing)
-        }
-        .font(.system(size: 9, weight: .semibold))
-        .foregroundColor(PSTheme.textMuted)
-        .padding(.horizontal, 8).padding(.vertical, 5)
-        .background(PSTheme.bgTertiary)
-    }
-
-    private func activityRow(_ connection: Connection, alternate: Bool) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(connection.processName.isEmpty ? "Unknown" : connection.processName)
-                    .font(.system(size: 11)).foregroundColor(PSTheme.textPrimary).lineLimit(1)
-                if let commandLine = connection.processCommandLine, !commandLine.isEmpty {
-                    Text(commandLine)
-                        .font(.system(size: 9)).foregroundColor(PSTheme.textMuted).lineLimit(1)
-                }
+            TableColumn("PID") { connection in
+                Text("\(connection.pid)")
+                    .font(.system(size: 10)).monospacedDigit()
+                    .foregroundColor(PSTheme.textSecondary)
             }
-            .frame(width: 190, alignment: .leading)
+            .width(min: 48, ideal: 64)
 
-            Text(connection.repoRoot.map { ($0 as NSString).lastPathComponent } ?? "—")
-                .font(.system(size: 10)).foregroundColor(PSTheme.textSecondary).lineLimit(1)
-                .frame(width: 170, alignment: .leading)
+            TableColumn("Repository") { connection in
+                repositoryCell(connection)
+            }
+            .width(min: 110, ideal: 170)
 
-            HStack(spacing: 4) {
-                Text(connection.remoteHost.isEmpty ? connection.remoteIP : connection.remoteHost)
-                    .font(.system(size: 10)).foregroundColor(PSTheme.textSecondary).lineLimit(1)
-                Text(":\(connection.remotePort)")
+            TableColumn("Remote") { connection in
+                remoteCell(connection)
+            }
+            .width(min: 150, ideal: 240)
+
+            // Byte totals are per process, not per socket, so they are resolved
+            // by PID and deliberately not sortable: the toolbar has nothing
+            // meaningful to order them by.
+            TableColumn("In") { connection in
+                Text(inboundText(connection))
+                    .font(.system(size: 10)).monospacedDigit()
+                    .foregroundColor(PSTheme.textSecondary)
+            }
+            .width(min: 56, ideal: 76)
+
+            TableColumn("Out") { connection in
+                Text(outboundText(connection))
+                    .font(.system(size: 10)).monospacedDigit()
+                    .foregroundColor(PSTheme.textSecondary)
+            }
+            .width(min: 56, ideal: 76)
+
+            TableColumn("Seen") { connection in
+                Text(relativeTime(connection.lastSeen))
                     .font(.system(size: 10)).foregroundColor(PSTheme.textMuted)
-                if connection.remotePort == AppConstants.devmonProxyPort {
-                    PSChip("proxy", color: PSTheme.accentGreen)
-                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text(relativeTime(connection.lastSeen))
-                .font(.system(size: 9)).foregroundColor(PSTheme.textMuted)
-                .frame(width: 60, alignment: .trailing)
+            .width(min: 48, ideal: 64)
         }
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(alternate ? PSTheme.bgRowAlt : PSTheme.bgRow)
+    }
+
+    private func repositoryCell(_ connection: Connection) -> some View {
+        let label = RepositoryLabel(connection: connection)
+        let text: String
+        switch label {
+        case .repository: text = label.text
+        case .directory: text = "\(label.text) (not a repo)"
+        case .unknown: text = label.text
+        }
+        return Text(text)
+            .font(.system(size: 10))
+            .foregroundColor(label.isRepository ? PSTheme.textSecondary : PSTheme.textMuted)
+            .lineLimit(1)
+            .help(repositoryHelp(connection, label: label))
+    }
+
+    private func repositoryHelp(_ connection: Connection, label: RepositoryLabel) -> String {
+        guard let cwd = connection.processCwd, !cwd.isEmpty else { return label.help }
+        return "\(label.help)\nworking directory: \(cwd)"
+    }
+
+    private func remoteCell(_ connection: Connection) -> some View {
+        HStack(spacing: 4) {
+            Text(connection.remoteHost.isEmpty ? connection.remoteIP : connection.remoteHost)
+                .font(.system(size: 10)).foregroundColor(PSTheme.textSecondary).lineLimit(1)
+            Text(":\(connection.remotePort)")
+                .font(.system(size: 10)).foregroundColor(PSTheme.textMuted)
+            if connection.remotePort == AppConstants.devmonProxyPort {
+                PSChip("proxy", color: PSTheme.accentGreen)
+            }
+        }
+    }
+
+    /// `lsof` reports no per-socket byte counters, so a connection shows the
+    /// cumulative totals of the process that owns it (resolved through its PID).
+    /// Every connection of one process therefore shares the same figure.
+    private func inboundText(_ connection: Connection) -> String {
+        guard let traffic = state.processTrafficByPID[connection.pid] else { return "—" }
+        return PSFormat.bytes(traffic.bytesIn)
+    }
+
+    private func outboundText(_ connection: Connection) -> String {
+        guard let traffic = state.processTrafficByPID[connection.pid] else { return "—" }
+        return PSFormat.bytes(traffic.bytesOut)
     }
 
     // MARK: - Detail pane
@@ -402,11 +511,31 @@ struct AuditView: View {
 
     /// With nothing selected the pane shows what the audit cannot explain yet,
     /// which is the list that tells you what still needs an audience.
+    /// Live snapshot for "All time"; the persisted trail once a window is chosen.
+    private var sourceConnections: [Connection] {
+        timeWindow == .all ? state.connections : state.auditHistory
+    }
+
     private var selectedActivity: [Connection] {
-        let matching = state.selectedAudienceId == nil
-            ? state.connections.filter { $0.audienceId == nil }
-            : state.connections.filter { $0.audienceId == state.selectedAudienceId }
+        let matching: [Connection]
+        if state.selectedAudienceId == nil {
+            matching = sourceConnections.filter { $0.audienceId == nil }
+        } else {
+            matching = sourceConnections.filter { $0.audienceId == state.selectedAudienceId }
+        }
         return matching.sorted { $0.lastSeen > $1.lastSeen }
+    }
+
+    /// Ordered newest-first. Column sorting is deliberately not offered: the
+    /// sortable `TableColumn` overload needs macOS 14, and this app targets 13.
+    /// Column resizing and reordering are unaffected by that.
+    private var visibleActivity: [Connection] {
+        selectedActivity
+    }
+
+    private func reloadHistory() {
+        guard timeWindow != .all else { return }
+        state.loadAuditHistory(since: timeWindow.cutoff, until: nil)
     }
 
     private var observedCount: Int { state.connections.count }

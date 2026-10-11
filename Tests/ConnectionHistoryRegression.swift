@@ -216,4 +216,63 @@ private func testConnectionStoreRetention() throws {
 func testConnectionHistoryRetention() throws {
     try testActiveConnectionIdentity()
     try testConnectionStoreRetention()
+    try testConnectionHistoryQuery()
+}
+
+private func testConnectionHistoryQuery() throws {
+    let databaseURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("puresnitch-history-query-\(UUID().uuidString).sqlite")
+    defer { try? FileManager.default.removeItem(at: databaseURL) }
+
+    let store = try RuleStore(path: databaseURL.path)
+    let audience = Audience(
+        id: UUID(),
+        name: "watch:whatsapp",
+        kind: .adHoc,
+        source: .manual,
+        matchers: [AudienceMatcher(kind: .processPathPrefix, pattern: "/Applications/WhatsApp.app")]
+    )
+    try store.upsertAudience(audience)
+
+    let now = Date()
+    func row(name: String, minutesAgo: Double, audienceId: UUID?) -> Connection {
+        Connection(
+            pid: 100,
+            processName: name,
+            processPath: "/Applications/\(name).app/Contents/MacOS/\(name)",
+            remoteHost: "203.0.113.7",
+            remoteIP: "203.0.113.7",
+            remotePort: 443,
+            status: .established,
+            firstSeen: now.addingTimeInterval(-minutesAgo * 60),
+            lastSeen: now.addingTimeInterval(-minutesAgo * 60),
+            audienceId: audienceId
+        )
+    }
+
+    try store.recordConnections([
+        row(name: "WhatsApp", minutesAgo: 10, audienceId: audience.id),
+        row(name: "WhatsApp", minutesAgo: 90, audienceId: audience.id),
+        row(name: "Slack", minutesAgo: 5, audienceId: nil),
+    ])
+
+    // "All WhatsApp connections in the past hour".
+    let recentWhatsApp = store.connectionHistory(
+        ConnectionQuery(processName: "WhatsApp", since: now.addingTimeInterval(-3_600))
+    )
+    try requireConnectionHistory(recentWhatsApp.count == 1, "the process/time window did not filter")
+    try requireConnectionHistory(recentWhatsApp.first?.processName == "WhatsApp", "the process filter returned the wrong row")
+
+    let byAudience = store.connectionHistory(ConnectionQuery(audienceId: audience.id))
+    try requireConnectionHistory(byAudience.count == 2, "the audience filter did not return both rows")
+
+    let unattributed = store.connectionHistory(ConnectionQuery(onlyUnattributed: true))
+    try requireConnectionHistory(unattributed.count == 1, "the unattributed filter did not isolate the unmatched row")
+    try requireConnectionHistory(unattributed.first?.processName == "Slack", "the unattributed filter returned the wrong row")
+
+    let all = store.connectionHistory(ConnectionQuery(limit: 10))
+    try requireConnectionHistory(all.count == 3, "the unfiltered query lost rows")
+    try requireConnectionHistory(all.first?.processName == "Slack", "history was not ordered newest first")
+
+    try requireConnectionHistory(store.connectionHistory(ConnectionQuery(limit: -1)).isEmpty, "a negative limit escaped the cap")
 }

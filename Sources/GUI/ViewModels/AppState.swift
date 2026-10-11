@@ -37,9 +37,16 @@ final class AppState: ObservableObject {
     @Published var topProcesses: [ProcessStats] = []
     @Published var topDomains: [DomainStats] = []
     @Published var topCountries: [CountryStats] = []
+    /// Per-process cumulative bytes from `nettop`, keyed by PID. This is the
+    /// single source of every byte figure in the UI: the `lsof` connections
+    /// carry no byte counters of their own.
+    @Published var processTrafficByPID: [Int32: ProcessTraffic] = [:]
     @Published var audiences: [Audience] = []
     @Published var audienceSummaries: [AudienceSummary] = []
     @Published var proxyReport: ProxyExpectationReport?
+    /// A time window pulled from the persisted audit trail. The live snapshot the
+    /// helper pushes is capped, so a window can reach rows the UI never saw.
+    @Published var auditHistory: [Connection] = []
     @Published var selectedAudienceId: UUID?
     @Published var searchQuery: String = ""
 
@@ -69,6 +76,7 @@ final class AppState: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var helperConnectionEpoch = 0
     private var rulesRequestGeneration = 0
+    private var historyRequestGeneration = 0
     private var hasLoadedRulesFromHelper = false
     private var hasLoadedStatusFromHelper = false
 
@@ -122,6 +130,9 @@ final class AppState: ObservableObject {
         let bytesIn: Int64
         let bytesOut: Int64
         let icon: NSImage?
+        /// Every PID seen for this process. A row aggregates by bundle id or
+        /// executable path, so more than one PID can land in a single row.
+        var pids: [Int32] = []
         var total: Int64 { bytesIn + bytesOut }
     }
 
@@ -207,6 +218,19 @@ final class AppState: ObservableObject {
         }
         helper.proxyExpectationReport { [weak self] report in
             self?.proxyReport = report
+        }
+    }
+
+    /// Pulls a time window from the persisted audit trail. The live snapshot is
+    /// capped at a few hundred rows, so a window can legitimately reach rows the
+    /// UI never received.
+    func loadAuditHistory(since: Date?, until: Date?) {
+        historyRequestGeneration &+= 1
+        let generation = historyRequestGeneration
+        let query = ConnectionQuery(since: since, until: until, limit: 2_000)
+        helper.connectionHistory(query) { [weak self] connections in
+            guard let self, generation == self.historyRequestGeneration else { return }
+            self.auditHistory = connections
         }
     }
 
@@ -414,61 +438,116 @@ final class AppState: ObservableObject {
         if logs.count > 1000 { logs.removeFirst(logs.count - 1000) }
     }
 
+    /// Per-process byte counters arrive on their own cadence (once per `nettop`
+    /// frame), so they are folded into the same aggregate pass as connections.
+    func updateProcessTraffic(_ traffic: [ProcessTraffic]) {
+        processTrafficByPID = Dictionary(
+            traffic.map { ($0.pid, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        Task { await self.recomputeAggregates() }
+    }
+
     func recomputeAggregates() async {
         let conns = self.connections
         let knownAudiences = self.audiences
-        var byProc: [String: (Int64, Int64, NSImage?)] = [:]
-        var byDom: [String: (Int64, Int64)] = [:]
-        var byCountry: [String: (String, Int64, Int64)] = [:]
+        let traffic = self.processTrafficByPID
+
+        // nettop counts bytes per process, not per socket, so a byte figure is
+        // attributed by the *distinct* PIDs in each bucket: a PID is counted
+        // once per bucket, never once per connection. Without this, a process
+        // with several open sockets would be multiplied by the number of rows
+        // it appears in. The result is an upper bound for destinations (a
+        // process talking to N hosts contributes its whole total to each), which
+        // is the honest reading of a per-process counter.
+        func bytes(for pids: Set<Int32>) -> (inBytes: Int64, outBytes: Int64) {
+            var i: Int64 = 0
+            var o: Int64 = 0
+            for pid in pids {
+                guard let t = traffic[pid] else { continue }
+                i += t.bytesIn
+                o += t.bytesOut
+            }
+            return (i, o)
+        }
+
+        var procPIDs: [String: (pids: Set<Int32>, icon: NSImage?, name: String)] = [:]
+        var domPIDs: [String: Set<Int32>] = [:]
+        var countryPIDs: [String: (name: String, pids: Set<Int32>)] = [:]
+        var audiencePIDs: [UUID: (pids: Set<Int32>, count: Int, proxied: Int, first: Date?, last: Date?)] = [:]
+
         for c in conns {
             let pkey = c.processBundleId ?? c.processPath
-            let cur = byProc[pkey] ?? (0, 0, nil)
-            byProc[pkey] = (cur.0 + c.bytesIn, cur.1 + c.bytesOut, cur.2 ?? AppIcon.resolve(bundleId: c.processBundleId, path: c.processPath, name: c.processName))
+            let fallbackName: String = {
+                let preferred = traffic[c.pid]?.processName ?? c.processName
+                return preferred.isEmpty ? (pkey as NSString).lastPathComponent : preferred
+            }()
+            var proc = procPIDs[pkey] ?? (pids: [], icon: nil, name: fallbackName)
+            proc.pids.insert(c.pid)
+            if proc.name.isEmpty { proc.name = fallbackName }
+            if proc.icon == nil {
+                proc.icon = AppIcon.resolve(bundleId: c.processBundleId, path: c.processPath, name: c.processName)
+            }
+            procPIDs[pkey] = proc
+
             let dom = c.remoteHost.isEmpty ? c.remoteIP : c.remoteHost
-            let cd = byDom[dom] ?? (0, 0)
-            byDom[dom] = (cd.0 + c.bytesIn, cd.1 + c.bytesOut)
+            domPIDs[dom, default: []].insert(c.pid)
+
             if let cc = c.countryCode, !cc.isEmpty {
-                let cur = byCountry[cc] ?? (c.country ?? cc, 0, 0)
-                byCountry[cc] = (cur.0, cur.1 + c.bytesIn, cur.2 + c.bytesOut)
+                var entry = countryPIDs[cc] ?? (c.country ?? cc, [])
+                entry.pids.insert(c.pid)
+                countryPIDs[cc] = entry
+            }
+
+            if let id = c.audienceId {
+                var entry = audiencePIDs[id] ?? ([], 0, 0, nil, nil)
+                entry.pids.insert(c.pid)
+                entry.count += 1
+                if c.remotePort == AppConstants.devmonProxyPort { entry.proxied += 1 }
+                entry.first = min(entry.first ?? c.firstSeen, c.firstSeen)
+                entry.last = max(entry.last ?? c.lastSeen, c.lastSeen)
+                audiencePIDs[id] = entry
             }
         }
-        topProcesses = byProc.map { (k, v) in
-            ProcessStats(id: k, name: (k as NSString).lastPathComponent, bytesIn: v.0, bytesOut: v.1, icon: v.2)
+
+        topProcesses = procPIDs.map { key, value in
+            let totals = bytes(for: value.pids)
+            return ProcessStats(
+                id: key,
+                name: value.name,
+                bytesIn: totals.inBytes,
+                bytesOut: totals.outBytes,
+                icon: value.icon,
+                pids: value.pids.sorted()
+            )
         }.sorted { $0.total > $1.total }.prefix(20).map { $0 }
-        topDomains = byDom.map { (k, v) in
-            DomainStats(id: k, domain: k, bytesIn: v.0, bytesOut: v.1)
+
+        topDomains = domPIDs.map { domain, pids in
+            let totals = bytes(for: pids)
+            return DomainStats(id: domain, domain: domain, bytesIn: totals.inBytes, bytesOut: totals.outBytes)
         }.sorted { $0.total > $1.total }.prefix(20).map { $0 }
-        topCountries = byCountry.map { (cc, v) in
-            CountryStats(id: cc, country: v.0, countryCode: cc, bytesIn: v.1, bytesOut: v.2)
+
+        topCountries = countryPIDs.map { code, value in
+            let totals = bytes(for: value.pids)
+            return CountryStats(id: code, country: value.name, countryCode: code, bytesIn: totals.inBytes, bytesOut: totals.outBytes)
         }.sorted { $0.total > $1.total }.prefix(20).map { $0 }
 
         // Live per-audience rollup. Audiences with no traffic are still listed:
         // "declared but silent" is exactly what an audit needs to see.
-        var byAudience: [UUID: (count: Int, bytesIn: Int64, bytesOut: Int64, proxied: Int, first: Date?, last: Date?)] = [:]
-        for c in conns {
-            guard let id = c.audienceId else { continue }
-            var entry = byAudience[id] ?? (0, 0, 0, 0, nil, nil)
-            entry.count += 1
-            entry.bytesIn += c.bytesIn
-            entry.bytesOut += c.bytesOut
-            if c.remotePort == AppConstants.devmonProxyPort { entry.proxied += 1 }
-            entry.first = min(entry.first ?? c.firstSeen, c.firstSeen)
-            entry.last = max(entry.last ?? c.lastSeen, c.lastSeen)
-            byAudience[id] = entry
-        }
         audienceSummaries = knownAudiences.map { audience in
-            let stats = byAudience[audience.id]
+            let entry = audiencePIDs[audience.id]
+            let totals = bytes(for: entry?.pids ?? [])
             return AudienceSummary(
                 id: audience.id,
                 name: audience.name,
                 kind: audience.kind,
                 icon: audience.icon,
-                connectionCount: stats?.count ?? 0,
-                bytesIn: stats?.bytesIn ?? 0,
-                bytesOut: stats?.bytesOut ?? 0,
-                proxiedCount: stats?.proxied ?? 0,
-                firstSeen: stats?.first,
-                lastSeen: stats?.last
+                connectionCount: entry?.count ?? 0,
+                bytesIn: totals.inBytes,
+                bytesOut: totals.outBytes,
+                proxiedCount: entry?.proxied ?? 0,
+                firstSeen: entry?.first,
+                lastSeen: entry?.last
             )
         }.sorted { lhs, rhs in
             if lhs.total != rhs.total { return lhs.total > rhs.total }

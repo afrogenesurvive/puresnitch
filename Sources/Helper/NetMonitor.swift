@@ -64,6 +64,9 @@ final class NetMonitor: @unchecked Sendable {
 
     var onConnections: (([Connection]) -> Void)?
     var onSample: ((TrafficSample) -> Void)?
+    /// Per-process cumulative bytes, emitted once per `nettop` frame. Separate
+    /// from `onSample`, which is the whole-machine rate for the menubar graph.
+    var onProcessTraffic: (([ProcessTraffic]) -> Void)?
 
     /// Stamps country and coordinates onto every snapshot. Injected rather than
     /// built here, so the helper owns the user's preference and the regression
@@ -260,9 +263,21 @@ final class NetMonitor: @unchecked Sendable {
         }
     }
 
+    /// The `nettop` process column is `<name>.<pid>`. Process names may contain
+    /// dots (`com.apple.WebKit.Networking.123`), so split on the *last* dot and
+    /// require a numeric tail rather than trusting the first separator.
+    private static func processColumn(_ field: String) -> (name: String, pid: Int32)? {
+        guard let dot = field.lastIndex(of: ".") else { return nil }
+        let name = String(field[field.startIndex..<dot])
+        let pidText = field[field.index(after: dot)...]
+        guard !name.isEmpty, let pid = Int32(pidText), pid > 0 else { return nil }
+        return (name, pid)
+    }
+
     private func completeFrame(_ lines: [String]) {
         var totalIn: Int64 = 0
         var totalOut: Int64 = 0
+        var perProcess: [Int32: ProcessTraffic] = [:]
         for line in lines {
             let parts = line.split(separator: ",")
             guard parts.count >= 3,
@@ -270,8 +285,24 @@ final class NetMonitor: @unchecked Sendable {
                   let bout = Int64(parts[parts.count - 1]) else { continue }
             totalIn += bin
             totalOut += bout
+            if let parsed = Self.processColumn(String(parts[0])) {
+                perProcess[parsed.pid] = ProcessTraffic(
+                    pid: parsed.pid,
+                    processName: parsed.name,
+                    bytesIn: bin,
+                    bytesOut: bout
+                )
+            }
         }
         let now = Date()
+
+        // Per-process totals are cumulative counters, not a rate, so they are
+        // published on every frame including the first: the process list must
+        // not wait a cycle for a baseline. A whole frame replaces the map, so a
+        // PID that exited simply drops out.
+        if !perProcess.isEmpty {
+            onProcessTraffic?(perProcess.values.sorted { $0.pid < $1.pid })
+        }
 
         // The first frame is only a baseline: nettop counters are cumulative
         // since it started, so emitting a rate here would report the whole

@@ -87,6 +87,8 @@ public final class RuleStore: @unchecked Sendable {
         CREATE INDEX IF NOT EXISTS idx_conn_status ON connections(status);
         CREATE INDEX IF NOT EXISTS idx_conn_pid ON connections(pid);
         CREATE INDEX IF NOT EXISTS idx_conn_last_seen ON connections(last_seen DESC);
+        -- Serves the process/time-window history query the audit uses.
+        CREATE INDEX IF NOT EXISTS idx_conn_process_last_seen ON connections(process_name, last_seen DESC);
 
         CREATE TABLE IF NOT EXISTS profiles (
             id TEXT PRIMARY KEY,
@@ -430,6 +432,57 @@ public final class RuleStore: @unchecked Sendable {
             } else {
                 sqlite3_bind_int64(stmt, 1, Int64(safeLimit))
             }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let c = readConn(stmt) { out.append(c) }
+            }
+            return out
+        }
+    }
+
+    /// Connections matching an optional filter, newest first.
+    ///
+    /// One prepared statement serves the whole audit: a predicate is only added
+    /// when a value is present, so the live list, a single audience and a
+    /// process/time window share one code path instead of each building SQL.
+    public func connectionHistory(_ query: ConnectionQuery) -> [Connection] {
+        queue.sync {
+            var out: [Connection] = []
+            var clauses: [String] = []
+            if query.onlyUnattributed {
+                clauses.append("audience_id IS NULL")
+            } else if query.audienceId != nil {
+                clauses.append("audience_id=?")
+            }
+            if query.processName != nil { clauses.append("process_name=?") }
+            if query.since != nil { clauses.append("last_seen>=?") }
+            if query.until != nil { clauses.append("last_seen<=?") }
+            let whereClause = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+            let sql = "SELECT * FROM connections \(whereClause) ORDER BY last_seen DESC LIMIT ?;"
+
+            var stmt: OpaquePointer?
+            defer { if stmt != nil { sqlite3_finalize(stmt) } }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+
+            var index: Int32 = 1
+            if !query.onlyUnattributed, let audienceId = query.audienceId {
+                sqlite3_bind_text(stmt, index, audienceId.uuidString, -1, SQLITE_TRANSIENT)
+                index += 1
+            }
+            if let processName = query.processName {
+                sqlite3_bind_text(stmt, index, processName, -1, SQLITE_TRANSIENT)
+                index += 1
+            }
+            if let since = query.since {
+                sqlite3_bind_double(stmt, index, since.timeIntervalSince1970)
+                index += 1
+            }
+            if let until = query.until {
+                sqlite3_bind_double(stmt, index, until.timeIntervalSince1970)
+                index += 1
+            }
+            let safeLimit = min(max(query.limit, 0), Self.connectionHistoryLimit)
+            sqlite3_bind_int64(stmt, index, Int64(safeLimit))
+
             while sqlite3_step(stmt) == SQLITE_ROW {
                 if let c = readConn(stmt) { out.append(c) }
             }

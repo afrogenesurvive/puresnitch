@@ -203,7 +203,12 @@ struct ProcessRow: View {
                 Image(systemName: "app.dashed").foregroundColor(PSTheme.textSecondary)
                     .frame(width: 18, height: 18)
             }
-            Text(stats.name).lineLimit(1).font(.system(size: 12)).foregroundColor(PSTheme.textPrimary)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(stats.name).lineLimit(1).font(.system(size: 12)).foregroundColor(PSTheme.textPrimary)
+                if !stats.pids.isEmpty {
+                    Text(pidLabel).lineLimit(1).font(.system(size: 9)).foregroundColor(PSTheme.textMuted)
+                }
+            }
             Spacer()
             Text(PSFormat.bytes(stats.total))
                 .font(.system(size: 10, weight: .semibold))
@@ -214,6 +219,22 @@ struct ProcessRow: View {
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(selected ? PSTheme.accent.opacity(0.18) : Color.clear)
         .contentShape(Rectangle())
+        .help(processHelp)
+    }
+
+    /// A process row aggregates by bundle id or executable path, so it can cover
+    /// more than one PID; the subline says which.
+    private var pidLabel: String {
+        stats.pids.count == 1 ? "pid \(stats.pids[0])" : "\(stats.pids.count) pids"
+    }
+
+    private var processHelp: String {
+        var lines = [stats.name]
+        if !stats.pids.isEmpty {
+            lines.append(stats.pids.map { "pid \($0)" }.joined(separator: ", "))
+        }
+        lines.append("↓ \(PSFormat.bytes(stats.bytesIn))  ↑ \(PSFormat.bytes(stats.bytesOut))")
+        return lines.joined(separator: "\n")
     }
     private var statusDot: some View {
         Circle().fill(PSTheme.accentBlue).frame(width: 6, height: 6)

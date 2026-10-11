@@ -149,9 +149,13 @@ The pre-migration `/etc/pf.conf.puresnitch.bak` is retained for manual recovery.
 
 ## Per-process observation
 
-- `nettop -P -L 0 -x -J bytes_in,bytes_out -s 1` runs continuously. Each line update is parsed for process-level throughput which feeds the menubar histogram and Network Monitor process list.
-- `lsof -i -n -P -F pcnPT` is polled every 2 s. Output is parsed into `Connection` records with PID, process path, transport, local/remote IP+port, and an inferred bundle ID (via Info.plist of the enclosing `.app`). A continuously observed socket keeps one database row; a gap starts a new session, and history is capped at the newest 5,000 rows. These snapshots do not carry per-connection byte totals. (v0.2.1 also performed no IP geolocation; locations are attributed on-device in the version in development - see below.)
+- `nettop -P -L 0 -x -J bytes_in,bytes_out -s 1` runs continuously. Each frame is parsed twice: the whole-frame sum feeds the menubar histogram (`TrafficSample`), and each per-process line (`<name>.<pid>,bytes_in,bytes_out`) feeds a PID-keyed `ProcessTraffic` map. That map is the source of every byte figure in the app, because the `lsof` snapshots below carry no byte counters of their own. It is pushed to the GUI with `notifyProcessTraffic`.
+- `lsof -i -n -P -F pcnPT` is polled every 2 s. Output is parsed into `Connection` records with PID, process path, transport, local/remote IP+port, and an inferred bundle ID (via Info.plist of the enclosing `.app`). A continuously observed socket keeps one database row; a gap starts a new session, and history is capped at the newest 5,000 rows. These snapshots do not carry per-connection byte totals, so the audit resolves a connection's In/Out through its PID instead — a per-process figure shared by that process's connections, never a per-socket one.
 - Process identity is enriched by `Helper/ProcessResolver.swift`, which caches the executable path, working directory, bundle ID and command line per PID. One cached lookup replaces a `/bin/ps` spawn per connection per poll.
+
+### Byte attribution
+
+`nettop` counts bytes per process, not per socket, so `AppState.recomputeAggregates()` attributes bytes by the **distinct** PIDs in each bucket (process, audience, destination) rather than summing connection rows. Without that, a process with several open sockets would be multiplied by the number of rows it appears in. The result is an upper bound for destinations — a process talking to N hosts contributes its whole total to each — and that is the honest reading of a per-process counter.
 
 ## Geolocation (on-device)
 
@@ -206,17 +210,32 @@ The AI Activity window attributes observed connections to *audiences*: a client,
 
 Matchers in different groups are OR'd, so an audience is the union of everything its groups name. Matchers sharing a non-nil `group` must all match, which is how "loopback host AND this port" is expressed without the host matcher alone swallowing every local connection. `commandLineContains` is what separates a plain `node` from a specific MCP server script, because `lsof` reports only the command name.
 
+### The activity table
+
+The connection list is a SwiftUI `Table`, so its columns (Process, PID, Repository, Remote, In, Out, Seen) are user-resizable and sortable. Two of them need explaining:
+
+- **Repository** comes from `RepositoryLabel`, which names the enclosing `.git` when the process working directory sits in one. A GUI process that runs with cwd `/` has no repository to name, so the label falls back to the working-directory name marked "(not a repo)", and to "Unknown" only when the directory could not be read at all — an explicit fallback rather than a bare dash that hides why. `RepoLocator` caches cwd→repo results and the helper clears that cache on a 5-minute timer and on every rescan, so a repository cloned while the helper runs is picked up.
+- **In/Out** resolve through `processTrafficByPID`, since `lsof` has no byte counters (see Byte attribution above).
+
+The header's time-window picker (Past hour / 6 hours / 24 hours / All time) switches the table from the live snapshot to a `ConnectionQuery` against the persisted trail (`connectionHistory`), so a window can reach rows the capped live snapshot never carried. An MCP server reached over stdio has no network flows at all, so it cannot appear here; only servers that open their own sockets do.
+
+### MCP discovery
+
+An MCP server is declared in one of several client configuration files, all of which are scanned: VS Code's `Code/User/mcp.json` and a per-workspace `<repo>/.vscode/mcp.json`, Cursor's `~/.cursor/mcp.json`, and Claude Desktop's `claude_desktop_config.json` (which use `mcpServers` rather than VS Code's `servers`). A server launched through `npx`/`uvx` runs the *resolved* package, so the literal argument never appears on the child's command line — `AudienceDiscovery.mcpMatchPattern` therefore matches the package name (`@scope/name`, a path-shaped token, or a hyphenated bare name) instead of skipping the server.
+
 ### Discovery runs as root
 
 `AudienceDiscovery` runs inside the root helper but deliberately reads owner configuration. It resolves the owner's home from the claimed owner UID, falling back to the console user, rather than from `NSHomeDirectory()`, which would be root's home. It reads only from an allow-list and never writes:
 
 - `~/Library/Application Support/Code/User`
 - `~/.vscode-mcp-servers`
-- `~/Documents/GitHub`
+- `~/Documents/GitHub` (including each repository's `.vscode/mcp.json`)
 - `/Applications` and `~/Applications`
 - `~/.config/opencode/opencode.jsonc`
 - `~/.codex/config.toml`
 - `~/.claude/settings.json`
+- `~/.cursor/mcp.json`
+- `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 Symlinks that escape the owner's home are refused, repository discovery stops at 200 repositories, and files above 1 MiB are skipped.
 

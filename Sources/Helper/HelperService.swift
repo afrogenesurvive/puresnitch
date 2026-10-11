@@ -15,6 +15,10 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     /// Derives the git repository behind a process working directory so a bare
     /// `node`/`python` agent can be attributed to the project it runs in.
     private let repoLocator = RepoLocator()
+    /// Clears `RepoLocator`'s cwd→repo cache on a slow cadence so a repository
+    /// cloned while the helper is running is picked up without a restart — a
+    /// cached miss is otherwise permanent for that working directory.
+    private var repoCacheTimer: DispatchSourceTimer?
     private let blocklists: BlocklistManager
     private let listener: NSXPCListener
     private var clientConnections: [NSXPCConnection] = []
@@ -134,6 +138,14 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
                 }
             }
         }
+        netmon.onProcessTraffic = { [weak self] traffic in
+            guard let self, !traffic.isEmpty else { return }
+            self.broadcast { _, c in
+                if let data = try? JSONEncoder().encode(traffic) {
+                    c.notifyProcessTraffic(processTrafficJSON: data)
+                }
+            }
+        }
 
         listener.setConnectionCodeSigningRequirement(clientCodeRequirement)
         listener.delegate = self
@@ -207,9 +219,25 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         }
         seedDiscoveredAudiences()
         netmon.start()
+        startRepoCacheRefresh()
         mutationLock.unlock()
         listener.resume()
         Task { await blocklists.refresh() }
+    }
+
+    /// A repository cloned after the helper started would otherwise stay
+    /// invisible for that working directory: `RepoLocator` caches a miss
+    /// permanently. Re-walking every poll would be wasteful, so the cache is
+    /// dropped on a slow timer instead.
+    private func startRepoCacheRefresh() {
+        repoCacheTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 300, repeating: 300)
+        timer.setEventHandler { [weak self] in
+            self?.repoLocator.clearCache()
+        }
+        timer.resume()
+        repoCacheTimer = timer
     }
 
     /// Seeds audiences from the owner's client configuration and records what
@@ -265,6 +293,8 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     func shutdown() {
         mutationLock.lock()
         defer { mutationLock.unlock() }
+        repoCacheTimer?.cancel()
+        repoCacheTimer = nil
         if legacyPFMigrationPending {
             // A missing historical intent is not permission to remove rules.
             // Explicit GUI repair or Homebrew cleanup resolves this state.
@@ -1015,6 +1045,9 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     func rediscoverAudiences(reply: @escaping (Data) -> Void) {
         guard authorizeCurrentXPCRequest(orReject: { reply(Data()) }) else { return }
         mutationLock.lock(); defer { mutationLock.unlock() }
+        // A rescan is the user asking for fresh facts, so a repository cloned
+        // since the last walk must not be masked by a cached miss.
+        repoLocator.clearCache()
         seedDiscoveredAudiences()
         reply((try? JSONEncoder().encode(store.allAudiences())) ?? Data())
     }
@@ -1031,6 +1064,15 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     private static func decodeDeclarations(_ raw: String?) -> [ProxyDeclaration] {
         guard let raw, let data = raw.data(using: .utf8) else { return [] }
         return (try? JSONDecoder().decode([ProxyDeclaration].self, from: data)) ?? []
+    }
+
+    func connectionHistory(queryJSON: Data, reply: @escaping (Data) -> Void) {
+        guard authorizeCurrentXPCRequest(orReject: { reply(Data()) }) else { return }
+        guard let query = try? JSONDecoder().decode(ConnectionQuery.self, from: queryJSON) else {
+            reply(Data())
+            return
+        }
+        reply((try? JSONEncoder().encode(store.connectionHistory(query))) ?? Data())
     }
 
     func recentDenied(limit: Int, reply: @escaping (Data) -> Void) {
