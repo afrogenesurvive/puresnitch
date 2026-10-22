@@ -21,6 +21,9 @@ final class AppState: ObservableObject {
     @Published var incomingCount: Int = 0
     @Published var pendingAlerts: [PendingAlert] = []
     @Published var helperConnected: Bool = false
+    /// Whether the helper is observing traffic (lsof/nettop polling). True on
+    /// launch; the menu-bar switch turns the whole monitor off and on.
+    @Published var monitoringEnabled: Bool = true
     @Published var helperStatusLoaded: Bool = false
     @Published var helperInstallState: HelperInstallState = .unknown
     @Published var helperNeedsRepair: Bool = false
@@ -172,6 +175,7 @@ final class AppState: ObservableObject {
         pfctlEnabled = status.pfctlActive
         dnsProxyEnabled = status.dnsProxyActive
         enforcementEnabled = status.enforcementDesired
+        monitoringEnabled = status.running
         geoLookupEnabled = status.geoLookupEnabled
         geoDatabaseAvailable = status.geoDatabaseAvailable
         if !helper.keepsEnforcementControlsLocked {
@@ -205,6 +209,20 @@ final class AppState: ObservableObject {
         helper.startMonitoring()
         refreshRules()
         refreshAudit()
+    }
+
+    /// Starts or stops observation entirely. Off means no lsof/nettop polling:
+    /// the helper observes nothing and pushes no traffic. Optimistic like the
+    /// mode switch — the next status poll (every 3 s) puts the authoritative
+    /// value back if the helper refused.
+    func setMonitoringEnabled(_ enabled: Bool) {
+        guard enabled != monitoringEnabled else { return }
+        monitoringEnabled = enabled
+        if enabled {
+            helper.startMonitoring()
+        } else {
+            helper.stopMonitoring()
+        }
     }
 
     /// Audience list plus the declaration-vs-observation report. Both are cheap

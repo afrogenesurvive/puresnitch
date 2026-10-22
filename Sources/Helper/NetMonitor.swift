@@ -278,6 +278,7 @@ final class NetMonitor: @unchecked Sendable {
         var totalIn: Int64 = 0
         var totalOut: Int64 = 0
         var perProcess: [Int32: ProcessTraffic] = [:]
+        perProcess.reserveCapacity(lines.count)
         for line in lines {
             let parts = line.split(separator: ",")
             guard parts.count >= 3,

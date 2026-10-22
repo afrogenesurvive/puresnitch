@@ -751,11 +751,15 @@ public final class RuleStore: @unchecked Sendable {
         try queue.sync { try pruneConnectionHistoryUnlocked() }
     }
     private func pruneConnectionHistoryUnlocked() throws {
+        // Ordered by last_seen alone so the `(last_seen DESC)` index streams it
+        // without a sort. Rows that share a timestamp (everything updated in one
+        // poll) are interchangeable, so the tie-break is deliberately left out:
+        // adding `rowid DESC` would force a full table sort on every run.
         let sql = """
         DELETE FROM connections
         WHERE rowid IN (
             SELECT rowid FROM connections
-            ORDER BY last_seen DESC, rowid DESC
+            ORDER BY last_seen DESC
             LIMIT -1 OFFSET ?
         );
         """

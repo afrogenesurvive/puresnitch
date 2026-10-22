@@ -62,3 +62,6 @@ Scripts/build_snitch.sh
 # so it is fetched by Scripts/fetch_geoip.sh instead of being committed. This
 # directory and its ATTRIBUTION.md stay tracked.
 Resources/GeoIP/*.mmdb
+
+# devsec_cogdebt derived artifacts
+.devsec_cogdebt/

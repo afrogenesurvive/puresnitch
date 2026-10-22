@@ -43,7 +43,8 @@ final class MenubarController {
             state.$trafficHistory.map { _ in () }.eraseToAnyPublisher(),
             state.$helperConnected.map { _ in () }.eraseToAnyPublisher(),
             state.$helperInstallState.map { _ in () }.eraseToAnyPublisher(),
-            state.$showSpeedsInMenuBar.map { _ in () }.eraseToAnyPublisher()
+            state.$showSpeedsInMenuBar.map { _ in () }.eraseToAnyPublisher(),
+            state.$monitoringEnabled.map { _ in () }.eraseToAnyPublisher()
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _ in self?.render() }
@@ -109,7 +110,7 @@ final class MenubarController {
     private func render() {
         guard let button = statusItem.button else { return }
 
-        let healthy = state.helperConnected
+        let healthy = state.helperConnected && state.monitoringEnabled
         let symbol = healthy ? "shield.lefthalf.filled" : "shield.slash"
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "PureSnitch")?
@@ -142,6 +143,7 @@ final class MenubarController {
             default: return "Helper not running — no traffic is being monitored"
             }
         }
+        guard state.monitoringEnabled else { return "Monitoring paused — no traffic is being observed" }
         return "↓ \(PSFormat.bytesPerSec(state.currentIn))  ↑ \(PSFormat.bytesPerSec(state.currentOut))"
     }
 

@@ -1630,6 +1630,10 @@ final class HelperClient: NSObject, ObservableObject {
         remote?.startMonitoring { _, _ in }
     }
 
+    func stopMonitoring() {
+        remote?.stopMonitoring { _, _ in }
+    }
+
     // MARK: - Audience audit
 
     func listAudiences(completion: @MainActor @escaping ([Audience]) -> Void) {

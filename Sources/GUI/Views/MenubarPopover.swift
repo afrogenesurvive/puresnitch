@@ -58,6 +58,9 @@ struct MenubarPopoverView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    monitoringRow
+                        .padding(.horizontal, 12)
+
                     trafficGraph
                         .padding(.horizontal, 12)
 
@@ -83,6 +86,38 @@ struct MenubarPopoverView: View {
 
             fullWindowButtons
         }
+    }
+
+    /// Master switch for the whole monitor: off stops lsof/nettop polling so no
+    /// traffic is observed at all. Reflects the helper's `running` status.
+    private var monitoringRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: state.monitoringEnabled ? "eye" : "eye.slash")
+                .font(.system(size: 13))
+                .foregroundColor(state.monitoringEnabled ? PSTheme.accentGreen : PSTheme.textMuted)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Monitoring")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(PSTheme.textPrimary)
+                Text(state.monitoringEnabled ? "Observing all network activity" : "Paused — nothing is being observed")
+                    .font(.system(size: 10))
+                    .foregroundColor(PSTheme.textMuted)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { state.monitoringEnabled },
+                set: { state.setMonitoringEnabled($0) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(!state.helperConnected)
+        }
+        .padding(12)
+        .background(PSTheme.bgTertiary)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     /// The "existing views" half of the deal: every one of these still opens the
