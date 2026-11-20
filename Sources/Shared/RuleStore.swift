@@ -5,6 +5,11 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 
 public final class RuleStore: @unchecked Sendable {
     static let connectionHistoryLimit = 5_000
+    /// How far the connection table may drift above `connectionHistoryLimit`
+    /// before the prune in `recordConnections` fires. Pruning every snapshot
+    /// ran an ordered 5,000-row scan plus delete churn on every poll; letting
+    /// the table overshoot by this much amortises that work over many polls.
+    static let connectionHistoryPruneSlack = 500
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "io.moamenbasel.puresnitch.rulestore")
@@ -404,7 +409,7 @@ public final class RuleStore: @unchecked Sendable {
                         }
                     }
                 }
-                try pruneConnectionHistoryUnlocked()
+                try pruneConnectionHistoryIfNeededUnlocked()
                 try exec("COMMIT;")
             } catch {
                 try? exec("ROLLBACK;")
@@ -770,6 +775,40 @@ public final class RuleStore: @unchecked Sendable {
         }
         sqlite3_bind_int64(stmt, 1, Int64(Self.connectionHistoryLimit))
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError(code: 4) }
+    }
+
+    /// Runs inside `recordConnections`'s write transaction. Instead of pruning
+    /// on every snapshot (an ordered 5,000-row scan plus delete churn per poll),
+    /// the table is allowed to overshoot the cap by `connectionHistoryPruneSlack`
+    /// and is pruned back to the cap only once it does. `setup()` still prunes
+    /// to the exact cap on launch, so the invariant holds after upgrade.
+    private func pruneConnectionHistoryIfNeededUnlocked() throws {
+        var count: Int64 = 0
+        var stmt: OpaquePointer?
+        defer { if stmt != nil { sqlite3_finalize(stmt) } }
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM connections;", -1, &stmt, nil) == SQLITE_OK else {
+            throw databaseError(code: 3)
+        }
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            count = sqlite3_column_int64(stmt, 0)
+        }
+        sqlite3_finalize(stmt)
+        stmt = nil
+        guard count > Int64(Self.connectionHistoryLimit + Self.connectionHistoryPruneSlack) else { return }
+        try pruneConnectionHistoryUnlocked()
+    }
+
+    /// One-time wipe of the accumulated audit trail, gated by a settings
+    /// sentinel so it runs exactly once (the 2026-11-20 performance pass starts
+    /// history fresh). Only `connections` is touched: rules, audiences,
+    /// profiles, blocklists and settings are preserved. Invoked by the helper
+    /// after opening the store, NOT by `setup()`, so direct store construction
+    /// in tests never drops fixture rows.
+    public func clearConnectionHistoryOnce() throws {
+        let key = "connection_history_cleared_v1"
+        guard getSetting(key) == nil else { return }
+        try exec("DELETE FROM connections;")
+        try setSetting(key, "1")
     }
     private func databaseError(code: Int) -> NSError {
         NSError(

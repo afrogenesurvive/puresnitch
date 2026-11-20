@@ -203,6 +203,26 @@ private func testConnectionStoreRetention() throws {
             try requireConnectionHistory(updated?.status == .denied, "upsert did not update mutable connection fields")
             let denied = migrated.recentConnections(limit: 10, status: .denied)
             try requireConnectionHistory(denied.contains { $0.id == sessionID }, "status-filtered history lost an upserted row")
+
+            // Per-insert pruning is slack-based, so the single session above is
+            // allowed to sit one row over the cap. Bursting past the slack must
+            // still restore the exact cap, which is what the physical-row-count
+            // assertion below verifies.
+            var burst: [Connection] = []
+            burst.reserveCapacity(RuleStore.connectionHistoryPruneSlack + 2)
+            for i in 0..<(RuleStore.connectionHistoryPruneSlack + 2) {
+                burst.append(Connection(
+                    id: UUID(),
+                    pid: 9000 + Int32(i),
+                    processName: "Burst",
+                    processPath: "/usr/bin/burst",
+                    remoteHost: "203.0.113.1",
+                    remoteIP: "203.0.113.1",
+                    remotePort: 443,
+                    status: .established
+                ))
+            }
+            try migrated.recordConnections(burst)
         }
 
         let retainedRowCount = try connectionRowCount(at: databaseURL.path)

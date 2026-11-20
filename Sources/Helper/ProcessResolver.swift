@@ -26,6 +26,12 @@ final class ProcessResolver: @unchecked Sendable {
     private let ttl: TimeInterval
     private let lock = NSLock()
     private var cache: [Int32: (commandName: String, info: Info, storedAt: Date)] = [:]
+    /// Bounds the cache. Eviction is lazy - an entry is only dropped when its
+    /// PID is requested again - so a machine cycling through many short-lived
+    /// PIDs would otherwise accumulate entries until the helper restarts.
+    /// Expired entries are cleared first; if the map still exceeds the cap it
+    /// is dropped wholesale (the same crude-bounded approach IPGeo uses).
+    private static let cacheLimit = 2_048
 
     init(ttl: TimeInterval = 60) {
         self.ttl = ttl
@@ -53,6 +59,13 @@ final class ProcessResolver: @unchecked Sendable {
 
         lock.lock()
         cache[pid] = (commandName, resolved, Date())
+        if cache.count > Self.cacheLimit {
+            let now = Date()
+            cache = cache.filter { now.timeIntervalSince($0.value.storedAt) < ttl }
+            if cache.count > Self.cacheLimit {
+                cache.removeAll(keepingCapacity: true)
+            }
+        }
         lock.unlock()
         return resolved
     }

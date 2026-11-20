@@ -70,6 +70,14 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         self.store = openedStore
         self.blocklists = BlocklistManager(store: openedStore)
         self.listener = listener
+        // One-time audit-trail wipe (2026-11-20 performance pass). Runs here
+        // rather than in `RuleStore.setup()` so opening the store in tests never
+        // drops fixture rows; the sentinel makes subsequent launches a no-op.
+        do {
+            try openedStore.clearConnectionHistoryOnce()
+        } catch {
+            PSLog.error(PSLog.helper, "one-time connection history clear failed: \(error)")
+        }
         // Geolocation is settled once, here. The database is loaded from the app
         // bundle (it is memory-mapped, so this costs nothing at startup) and the
         // preference comes from the helper's own stored setting. NetMonitor holds

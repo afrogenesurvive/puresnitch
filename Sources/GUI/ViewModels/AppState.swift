@@ -232,7 +232,7 @@ final class AppState: ObservableObject {
         helper.listAudiences { [weak self] audiences in
             guard let self else { return }
             self.audiences = audiences
-            Task { await self.recomputeAggregates() }
+            Task { await self.recomputeAggregates(force: true) }
         }
         helper.proxyExpectationReport { [weak self] report in
             self?.proxyReport = report
@@ -466,7 +466,21 @@ final class AppState: ObservableObject {
         Task { await self.recomputeAggregates() }
     }
 
-    func recomputeAggregates() async {
+    /// Coalesces the aggregate pass: `updateConnections` (every poll) and
+    /// `updateProcessTraffic` (every nettop frame) both request a recompute, so
+    /// without a floor the full top-N derivation would re-run more often than
+    /// the underlying data changes. Explicit audit refreshes pass `force` to
+    /// bypass the floor so audience edits are reflected immediately.
+    private var lastAggregateRecompute = Date.distantPast
+    private static let aggregateRecomputeFloor: TimeInterval = 2.0
+
+    func recomputeAggregates(force: Bool = false) async {
+        let now = Date()
+        if !force, now.timeIntervalSince(lastAggregateRecompute) < Self.aggregateRecomputeFloor {
+            return
+        }
+        lastAggregateRecompute = now
+
         let conns = self.connections
         let knownAudiences = self.audiences
         let traffic = self.processTrafficByPID

@@ -125,17 +125,33 @@ enum PSTheme {
 }
 
 enum AppIcon {
-    /// Resolves a real application icon from a bundle id, executable/app path,
-    /// or app name. Returns nil if the app can't be located on this machine
-    /// (callers fall back to an SF Symbol). NSWorkspace caches icons, so this
-    /// is cheap enough to call from a list row.
+    /// `NSWorkspace` caches the icon images themselves, but every call still
+    /// pays a bundle-id lookup and/or a `fileExists` probe per candidate. The
+    /// aggregate pass calls this once per distinct process on every recompute,
+    /// so both hits and misses are cached to keep those probes off the refresh
+    /// path.
+    private static let iconCache = NSCache<NSString, NSImage>()
+    private static var iconMisses: Set<String> = []
+    private static let iconMissesLock = NSLock()
+    private static let iconMissesLimit = 4_096
+
     static func resolve(bundleId: String? = nil, path: String? = nil, name: String? = nil) -> NSImage? {
+        let key = [bundleId, path, name].compactMap { $0 }.first(where: { !$0.isEmpty }) ?? ""
+        if let cached = iconCache.object(forKey: key as NSString) {
+            return cached
+        }
+        iconMissesLock.lock()
+        let knownMiss = iconMisses.contains(key)
+        iconMissesLock.unlock()
+        if knownMiss { return nil }
+
         let ws = NSWorkspace.shared
+        var result: NSImage?
         if let bid = bundleId, !bid.isEmpty,
            let url = ws.urlForApplication(withBundleIdentifier: bid) {
-            return ws.icon(forFile: url.path)
+            result = ws.icon(forFile: url.path)
         }
-        if let p = path, !p.isEmpty {
+        if result == nil, let p = path, !p.isEmpty {
             var appPath = p
             // Match the LAST ".app/" so nested bundles (…/Foo.app/…/Bar.app/…)
             // resolve to the innermost app that owns the executable.
@@ -143,10 +159,10 @@ enum AppIcon {
                 appPath = String(appPath[..<r.upperBound])
             }
             if FileManager.default.fileExists(atPath: appPath) {
-                return ws.icon(forFile: appPath)
+                result = ws.icon(forFile: appPath)
             }
         }
-        if let n = name, !n.isEmpty {
+        if result == nil, let n = name, !n.isEmpty {
             let dirs = ["/Applications",
                         "\(NSHomeDirectory())/Applications",
                         "/System/Applications",
@@ -155,11 +171,23 @@ enum AppIcon {
             for dir in dirs {
                 let candidate = "\(dir)/\(n).app"
                 if FileManager.default.fileExists(atPath: candidate) {
-                    return ws.icon(forFile: candidate)
+                    result = ws.icon(forFile: candidate)
+                    break
                 }
             }
         }
-        return nil
+
+        if let result {
+            iconCache.setObject(result, forKey: key as NSString)
+        } else {
+            iconMissesLock.lock()
+            iconMisses.insert(key)
+            if iconMisses.count > Self.iconMissesLimit {
+                iconMisses.removeAll(keepingCapacity: true)
+            }
+            iconMissesLock.unlock()
+        }
+        return result
     }
 }
 

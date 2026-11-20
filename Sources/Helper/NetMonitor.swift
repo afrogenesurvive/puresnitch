@@ -106,7 +106,7 @@ final class NetMonitor: @unchecked Sendable {
 
     private func startLsofPolling() {
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + 1.0, repeating: .seconds(2))
+        t.schedule(deadline: .now() + 1.0, repeating: .seconds(10))
         t.setEventHandler { [weak self] in self?.pollLsof() }
         t.resume()
         lsofTimer = t
