@@ -19,6 +19,16 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
     /// cloned while the helper is running is picked up without a restart — a
     /// cached miss is otherwise permanent for that working directory.
     private var repoCacheTimer: DispatchSourceTimer?
+    /// Captured at launch: a trashed or replaced bundle changes what
+    /// `Bundle.main` resolves to later. The plist is the launchd definition a
+    /// successor needs. While it exists a restart can adopt live PF state;
+    /// once it is gone nothing can, and holding the anchor only strands it.
+    private let launchdPlistPath = HelperBundlePresence.launchdPlistPath(
+        forHelperExecutable: ProcessInfo.processInfo.arguments.first ?? "",
+        label: AppConstants.xpcMachServiceName
+    )
+    private var bundlePresence = HelperBundlePresence(retireAfter: 2)
+    private var bundleWatchdog: DispatchSourceTimer?
     private let blocklists: BlocklistManager
     private let listener: NSXPCListener
     private var clientConnections: [NSXPCConnection] = []
@@ -230,6 +240,7 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         startRepoCacheRefresh()
         mutationLock.unlock()
         listener.resume()
+        startBundleWatchdog()
         Task { await blocklists.refresh() }
     }
 
@@ -305,13 +316,14 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
         repoCacheTimer = nil
         if legacyPFMigrationPending {
             // A missing historical intent is not permission to remove rules.
-            // Explicit GUI repair or Homebrew cleanup resolves this state.
+            // Explicit GUI repair or the cask's `PureSnitchHelper --cleanup`
+            // resolves this state.
             drainPendingAsksUsingCurrentMode()
             dns.stop()
             netmon.stop()
             return
         }
-        if enforcementDesired {
+        if enforcementDesired && successorCanAdoptPF {
             // Keep the validated PF subanchor and our enable reference live
             // across a normal launchd restart. The next helper instance reloads
             // the authoritative rules before reopening DNS.
@@ -320,6 +332,9 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
             netmon.stop()
             return
         }
+        if enforcementDesired {
+            PSLog.info(PSLog.pf, "launchd definition is gone; releasing PF state no successor can adopt")
+        }
         do {
             try stopEnforcementRuntimePreservingDesired()
         } catch {
@@ -327,6 +342,36 @@ final class HelperService: NSObject, HelperProtocol, @unchecked Sendable {
             return
         }
         netmon.stop()
+    }
+
+    /// launchd still reports the service as registered when SIGTERM arrives
+    /// from `launchctl remove`, so it cannot tell an uninstall from a restart
+    /// at signal time. The bundle can: an upgrade replaces the plist in place,
+    /// an uninstall or a trip to the Trash takes it away.
+    private var successorCanAdoptPF: Bool {
+        guard let launchdPlistPath else { return true }
+        return FileManager.default.fileExists(atPath: launchdPlistPath)
+    }
+
+    /// Dragging the app to the Trash sends no signal at all, so the daemon
+    /// would keep enforcing for an app that no longer exists. Poll for the
+    /// launchd definition and retire once it has been missing twice in a row.
+    private func startBundleWatchdog() {
+        guard let launchdPlistPath else { return }
+        let timer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue(label: "io.moamenbasel.puresnitch.bundle-watchdog", qos: .utility)
+        )
+        timer.schedule(deadline: .now() + 30, repeating: .seconds(30))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let present = FileManager.default.fileExists(atPath: launchdPlistPath)
+            guard self.bundlePresence.observe(plistPresent: present) else { return }
+            PSLog.info(PSLog.helper, "launchd definition missing at \(launchdPlistPath); retiring the helper")
+            self.shutdown()
+            exit(0)
+        }
+        timer.resume()
+        bundleWatchdog = timer
     }
 
     private static func clientCodeSigningRequirement() throws -> String {

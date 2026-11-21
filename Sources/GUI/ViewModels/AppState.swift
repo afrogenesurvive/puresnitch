@@ -52,6 +52,7 @@ final class AppState: ObservableObject {
     @Published var auditHistory: [Connection] = []
     @Published var selectedAudienceId: UUID?
     @Published var searchQuery: String = ""
+    weak var systemExtension: SystemExtensionManager?
 
     /// Menu-bar speed readout. Off by default: the status item is a plain
     /// template glyph unless the user asks for numbers.
