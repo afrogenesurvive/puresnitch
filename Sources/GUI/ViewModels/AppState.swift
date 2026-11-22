@@ -50,6 +50,11 @@ final class AppState: ObservableObject {
     /// A time window pulled from the persisted audit trail. The live snapshot the
     /// helper pushes is capped, so a window can reach rows the UI never saw.
     @Published var auditHistory: [Connection] = []
+    /// Per-audience history windows for the menu-bar AI tab's inline list. Keyed
+    /// by audience id so several expanded rows can coexist.
+    @Published var audienceHistory: [UUID: [Connection]] = [:]
+    /// Persisted unattributed rows for the menu-bar Misc tab.
+    @Published var unattributedHistory: [Connection] = []
     @Published var selectedAudienceId: UUID?
     @Published var searchQuery: String = ""
     weak var systemExtension: SystemExtensionManager?
@@ -81,6 +86,8 @@ final class AppState: ObservableObject {
     private var helperConnectionEpoch = 0
     private var rulesRequestGeneration = 0
     private var historyRequestGeneration = 0
+    private var audienceHistoryGenerations: [UUID: Int] = [:]
+    private var unattributedHistoryRequestGeneration = 0
     private var hasLoadedRulesFromHelper = false
     private var hasLoadedStatusFromHelper = false
 
@@ -250,6 +257,30 @@ final class AppState: ObservableObject {
         helper.connectionHistory(query) { [weak self] connections in
             guard let self, generation == self.historyRequestGeneration else { return }
             self.auditHistory = connections
+        }
+    }
+
+    /// Pulls a persisted window for one audience, for the menu-bar AI tab's
+    /// inline expansion. Keyed by audience id so expanded rows don't overwrite
+    /// each other.
+    func loadAudienceHistory(id: UUID, since: Date?, until: Date?) {
+        let generation = (audienceHistoryGenerations[id] ?? 0) &+ 1
+        audienceHistoryGenerations[id] = generation
+        let query = ConnectionQuery(audienceId: id, since: since, until: until, limit: 2_000)
+        helper.connectionHistory(query) { [weak self] connections in
+            guard let self, self.audienceHistoryGenerations[id] == generation else { return }
+            self.audienceHistory[id] = connections
+        }
+    }
+
+    /// Pulls the persisted unattributed rows for the menu-bar Misc tab.
+    func loadUnattributedHistory(since: Date?, until: Date?) {
+        unattributedHistoryRequestGeneration &+= 1
+        let generation = unattributedHistoryRequestGeneration
+        let query = ConnectionQuery(onlyUnattributed: true, since: since, until: until, limit: 2_000)
+        helper.connectionHistory(query) { [weak self] connections in
+            guard let self, generation == self.unattributedHistoryRequestGeneration else { return }
+            self.unattributedHistory = connections
         }
     }
 

@@ -6,37 +6,7 @@ import SwiftUI
 struct AuditView: View {
     @EnvironmentObject var state: AppState
     @State private var searchText = ""
-    @State private var timeWindow: TimeWindow = .all
-
-    /// How far back the activity table looks. Backed by the connection rows the
-    /// helper has already stored, so this is a filter over the audit trail, not a
-    /// separate query.
-    private enum TimeWindow: String, CaseIterable, Identifiable {
-        case hour = "1h"
-        case sixHours = "6h"
-        case day = "24h"
-        case all = "All"
-
-        var id: String { rawValue }
-
-        var label: String {
-            switch self {
-            case .hour: return "Past hour"
-            case .sixHours: return "Past 6 hours"
-            case .day: return "Past 24 hours"
-            case .all: return "All time"
-            }
-        }
-
-        var cutoff: Date? {
-            switch self {
-            case .hour: return Date().addingTimeInterval(-3_600)
-            case .sixHours: return Date().addingTimeInterval(-6 * 3_600)
-            case .day: return Date().addingTimeInterval(-24 * 3_600)
-            case .all: return nil
-            }
-        }
-    }
+    @State private var timeWindow: ActivityTimeWindow = .all
 
     var body: some View {
         VStack(spacing: 0) {
@@ -276,7 +246,7 @@ struct AuditView: View {
                         .font(.system(size: 9)).foregroundColor(PSTheme.textMuted)
                 }
                 Picker("", selection: $timeWindow) {
-                    ForEach(TimeWindow.allCases) { window in
+                    ForEach(ActivityTimeWindow.allCases) { window in
                         Text(window.label).tag(window)
                     }
                 }

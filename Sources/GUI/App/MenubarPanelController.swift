@@ -28,7 +28,7 @@ private final class KeyablePanel: NSPanel {
 final class MenubarPanelController {
 
     static let defaultSize = NSSize(width: 420, height: 600)
-    static let minimumSize = NSSize(width: 360, height: 420)
+    static let minimumSize = NSSize(width: 400, height: 420)
 
     /// Only the size is remembered. The position is always derived from the
     /// status item, so a frame saved on a display that is since gone can never

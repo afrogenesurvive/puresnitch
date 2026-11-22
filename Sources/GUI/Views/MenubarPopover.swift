@@ -31,6 +31,8 @@ struct MenubarPopoverView: View {
                 MiniRulesView(close: close)
             case .ai:
                 MiniAuditView(close: close)
+            case .misc:
+                MiniMiscView(close: close)
             }
         }
         .frame(minWidth: MenubarPanelController.minimumSize.width,

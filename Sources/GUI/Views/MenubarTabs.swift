@@ -14,6 +14,7 @@ enum PopoverTab: String, CaseIterable, Identifiable {
     case network
     case rules
     case ai
+    case misc
 
     var id: String { rawValue }
 
@@ -23,6 +24,7 @@ enum PopoverTab: String, CaseIterable, Identifiable {
         case .network: return "Network"
         case .rules: return "Rules"
         case .ai: return "AI"
+        case .misc: return "Misc"
         }
     }
 
@@ -32,6 +34,7 @@ enum PopoverTab: String, CaseIterable, Identifiable {
         case .network: return "globe"
         case .rules: return "list.bullet.rectangle"
         case .ai: return "sparkles"
+        case .misc: return "questionmark.circle"
         }
     }
 }
@@ -401,6 +404,8 @@ struct MiniAuditView: View {
     let close: () -> Void
 
     @State private var query = ""
+    @State private var timeWindow: ActivityTimeWindow = .all
+    @State private var expandedIds: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -422,12 +427,31 @@ struct MiniAuditView: View {
 
             summaryLine
 
+            HStack(spacing: 8) {
+                Spacer()
+                Picker("", selection: $timeWindow) {
+                    ForEach(ActivityTimeWindow.allCases) { window in
+                        Text(window.label).tag(window)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 120)
+                .help("Show only connections active within this window")
+            }
+            .padding(.horizontal, 14)
+
             Divider().background(PSTheme.stroke)
 
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(filtered.prefix(40)), id: \.id) { summary in
-                        row(summary)
+                        VStack(spacing: 0) {
+                            row(summary)
+                            if expandedIds.contains(summary.id) {
+                                expandedConnections(summary)
+                            }
+                        }
                     }
                     if filtered.isEmpty {
                         MiniPlaceholder(emptyMessage: "No audiences discovered yet.")
@@ -437,6 +461,7 @@ struct MiniAuditView: View {
             .frame(maxHeight: .infinity)
         }
         .onAppear { state.refreshAudit() }
+        .onChange(of: timeWindow) { _ in reloadExpanded() }
     }
 
     private var filtered: [AudienceSummary] {
@@ -479,10 +504,11 @@ struct MiniAuditView: View {
         state.audienceSummaries.reduce(0) { $0 + $1.connectionCount }
     }
 
+    /// Tapping the row expands or collapses the inline activity list instead of
+    /// opening the full window; the trailing chevron is the state indicator.
     private func row(_ summary: AudienceSummary) -> some View {
         Button {
-            close()
-            windows.showAudit()
+            toggle(summary.id)
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: summary.icon.isEmpty ? "person.2" : summary.icon)
@@ -506,7 +532,7 @@ struct MiniAuditView: View {
                 if summary.proxiedCount > 0 {
                     PSChip("proxied", color: PSTheme.accentGreen, icon: "checkmark.shield.fill")
                 }
-                Image(systemName: "chevron.right")
+                Image(systemName: expandedIds.contains(summary.id) ? "chevron.down" : "chevron.right")
                     .font(.system(size: 9))
                     .foregroundColor(PSTheme.textMuted)
             }
@@ -514,6 +540,45 @@ struct MiniAuditView: View {
             .padding(.horizontal, 14).padding(.vertical, 5)
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func expandedConnections(_ summary: AudienceSummary) -> some View {
+        let conns = connections(for: summary)
+        VStack(alignment: .leading, spacing: 0) {
+            if conns.isEmpty {
+                Text(state.helperConnected
+                     ? "No connections in this time window."
+                     : "Waiting for the PureSnitch helper.")
+                    .font(.system(size: 10))
+                    .foregroundColor(PSTheme.textMuted)
+                    .padding(.horizontal, 30).padding(.vertical, 6)
+            } else {
+                ForEach(Array(conns.prefix(15))) { connection in
+                    MiniConnectionRow(connection: connection)
+                }
+            }
+        }
+        .padding(.bottom, 4)
+    }
+
+    private func connections(for summary: AudienceSummary) -> [Connection] {
+        (state.audienceHistory[summary.id] ?? []).sorted { $0.lastSeen > $1.lastSeen }
+    }
+
+    private func toggle(_ id: UUID) {
+        if expandedIds.contains(id) {
+            expandedIds.remove(id)
+        } else {
+            expandedIds.insert(id)
+            state.loadAudienceHistory(id: id, since: timeWindow.cutoff, until: nil)
+        }
+    }
+
+    private func reloadExpanded() {
+        for id in expandedIds {
+            state.loadAudienceHistory(id: id, since: timeWindow.cutoff, until: nil)
+        }
     }
 
     private func subtitle(_ summary: AudienceSummary) -> String {
@@ -524,5 +589,64 @@ struct MiniAuditView: View {
             parts.append(formatter.localizedString(for: lastSeen, relativeTo: Date()))
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// A single connection row shared by the menu-bar AI and Misc tabs, so the two
+/// lists can't drift apart.
+struct MiniConnectionRow: View {
+    @EnvironmentObject var state: AppState
+    let connection: Connection
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(connection.processName.isEmpty ? "Unknown" : connection.processName)
+                    .font(.system(size: 12))
+                    .foregroundColor(PSTheme.textPrimary)
+                    .lineLimit(1)
+                Text(detailText)
+                    .font(.system(size: 10))
+                    .foregroundColor(PSTheme.textMuted)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if connection.remotePort == AppConstants.devmonProxyPort {
+                PSChip("proxy", color: PSTheme.accentGreen)
+            }
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("↓ \(inText)  ↑ \(outText)")
+                    .font(.system(size: 9))
+                    .monospacedDigit()
+                    .foregroundColor(PSTheme.textSecondary)
+                Text(relativeTime(connection.lastSeen))
+                    .font(.system(size: 9))
+                    .foregroundColor(PSTheme.textMuted)
+            }
+        }
+        .padding(.horizontal, 28).padding(.vertical, 4)
+    }
+
+    private var detailText: String {
+        let repo = RepositoryLabel(connection: connection).text
+        let host = connection.remoteHost.isEmpty ? connection.remoteIP : connection.remoteHost
+        return "\(repo) · \(host):\(connection.remotePort)"
+    }
+
+    private var inText: String {
+        guard let traffic = state.processTrafficByPID[connection.pid] else { return "—" }
+        return PSFormat.bytes(traffic.bytesIn)
+    }
+
+    private var outText: String {
+        guard let traffic = state.processTrafficByPID[connection.pid] else { return "—" }
+        return PSFormat.bytes(traffic.bytesOut)
+    }
+
+    private func relativeTime(_ date: Date) -> String {
+        let seconds = Int(Date().timeIntervalSince(date))
+        if seconds < 60 { return "\(max(seconds, 0))s" }
+        if seconds < 3_600 { return "\(seconds / 60)m" }
+        return "\(seconds / 3_600)h"
     }
 }

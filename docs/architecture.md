@@ -73,11 +73,14 @@ The status item's own window is exempted from the click monitor, because clickin
 it toggles the panel and hiding first would make it close and immediately reopen.
 
 The panel's SwiftUI root switches on `PopoverTab`. `Overview` is the original
-popover contents; `Network`, `Rules` and `AI` render purpose-built mini views
-from `MenubarTabs.swift`. The right-click menu, the header buttons and the
-popover's own "…" buttons keep opening the full `NetworkMonitorView`,
-`RulesManagerView` and `AuditView` windows — the tabs are a glance, never the
-only route to a window.
+popover contents; `Network`, `Rules`, `AI` and `Misc` render purpose-built mini
+views from `MenubarTabs.swift` (`MiniMiscView` lives in its own file). The `AI`
+tab lists audiences and expands a persisted activity list inline per audience;
+`Misc` lists unattributed connections. Both share `ActivityTimeWindow` (Past
+hour / 6 hours / 24 hours / All time) and the `MiniConnectionRow` row renderer.
+The right-click menu, the header buttons and the popover's own "…" buttons keep
+opening the full `NetworkMonitorView`, `RulesManagerView` and `AuditView`
+windows — the tabs are a glance, never the only route to a window.
 
 ## XPC contract
 
