@@ -76,7 +76,8 @@ The panel's SwiftUI root switches on `PopoverTab`. `Overview` is the original
 popover contents; `Network`, `Rules`, `AI` and `Misc` render purpose-built mini
 views from `MenubarTabs.swift` (`MiniMiscView` lives in its own file). The `AI`
 tab lists audiences and expands a persisted activity list inline per audience;
-`Misc` lists unattributed connections. Both share `ActivityTimeWindow` (Past
+`Misc` groups unattributed connections by process (bundle ID → path → name)
+with per-group expand/collapse. Both share `ActivityTimeWindow` (Past
 hour / 6 hours / 24 hours / All time) and the `MiniConnectionRow` row renderer.
 The right-click menu, the header buttons and the popover's own "…" buttons keep
 opening the full `NetworkMonitorView`, `RulesManagerView` and `AuditView`
@@ -247,6 +248,11 @@ Symlinks that escape the owner's home are refused, repository discovery stops at
 
 `ProxyDeclaration` records what a client *says* it will do: a base URL for a provider, never a credential, classified as `localProxy` (the recording proxy port), `localService` (another loopback service, such as a local model server) or `remoteEndpoint` (a provider reached directly). `ProxyExpectationBuilder` compares that declaration with the traffic actually observed and returns a `ProxyExpectationVerdict`: `proxied`, `bypassed`, `localEndpoint`, `idle` or `unattributed`. The report also lists `unproxiedAudiences`, audiences seen reaching remote hosts directly while nothing pointed them at a local proxy, which is derived from observation rather than declaration.
 
+When the dev_mon (DS-mon) recording proxy is present, the same card also shows
+the most recent *recorded requests*. `Sources/Shared/DevMonReader.swift` opens
+`~/Library/Application Support/dev_mon/usage.db` read-only and projects its
+`usage_log` rows into `DevMonRequest`; PureSnitch never writes that database.
+
 ## Rule matching
 
 `RuleMatcher.decision(for:rules:defaultMode:)` walks enabled, unexpired rules in `priority DESC` order. First match wins. No match = fall back to active mode (`alert` → `.ask`, `silentAllow` → `.allow`, `silentDeny` → `.deny`).
@@ -254,6 +260,11 @@ Symlinks that escape the owner's home are refused, repository discovery stops at
 Host glob: `*.example.com`, `.example.com` both match.
 IP CIDR: `10.0.0.0/8` matches anywhere in that block.
 Process: bundle ID match wins; otherwise path prefix.
+
+Rules normally come from remembered alert decisions, but the Rules window's
+"+" sheet (`Sources/GUI/Views/RuleEditorView.swift`) creates them by hand and
+runs the same `Rule.validateForPersistence()` gate the helper applies on its
+side.
 
 ## NetExt — per-process firewall (Network System Extension)
 

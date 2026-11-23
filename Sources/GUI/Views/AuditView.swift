@@ -201,6 +201,18 @@ struct AuditView: View {
                      : "Waiting for the PureSnitch helper.")
                     .font(.system(size: 10)).foregroundColor(PSTheme.textMuted)
             }
+
+            if !state.devmonRequests.isEmpty {
+                Divider().background(PSTheme.stroke)
+                HStack {
+                    Text("Recorded requests").font(.system(size: 10, weight: .semibold)).foregroundColor(PSTheme.textMuted)
+                    Spacer()
+                    Text("\(state.devmonRequests.count) recent").font(.system(size: 9)).foregroundColor(PSTheme.textMuted)
+                }
+                ForEach(Array(state.devmonRequests.prefix(8))) { request in
+                    devmonRow(request)
+                }
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -233,6 +245,27 @@ struct AuditView: View {
             }
         }
         .padding(.vertical, 3)
+    }
+
+    private func devmonRow(_ request: DevMonRequest) -> some View {
+        HStack(spacing: 6) {
+            PSChip(request.providerId.isEmpty ? "proxy" : request.providerId, color: PSTheme.accentGreen)
+            Text(request.model)
+                .font(.system(size: 10))
+                .foregroundColor(PSTheme.textPrimary)
+                .lineLimit(1)
+            Spacer()
+            Text("\(request.totalTokens) tok")
+                .font(.system(size: 9))
+                .foregroundColor(PSTheme.textSecondary)
+            Text("\(request.statusCode)")
+                .font(.system(size: 9))
+                .foregroundColor(request.statusCode >= 400 ? PSTheme.accentRed : PSTheme.textMuted)
+            Text(relativeTime(request.timestamp))
+                .font(.system(size: 9))
+                .foregroundColor(PSTheme.textMuted)
+        }
+        .padding(.vertical, 2)
     }
 
     private var activitySection: some View {

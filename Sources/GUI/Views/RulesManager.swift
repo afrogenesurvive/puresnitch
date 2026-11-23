@@ -6,6 +6,7 @@ struct RulesManagerView: View {
     @State private var selectedCategory: Category = .all
     @State private var searchText: String = ""
     @State private var selectedRule: Rule?
+    @State private var showRuleEditor = false
 
     enum Category: Hashable {
         case all
@@ -32,6 +33,9 @@ struct RulesManagerView: View {
         }
         .background(PSTheme.bgPrimary)
         .preferredColorScheme(state.themeMode.colorScheme)
+        .sheet(isPresented: $showRuleEditor) {
+            RuleEditorView().environmentObject(state)
+        }
     }
 
     private var sidebar: some View {
@@ -149,7 +153,8 @@ struct RulesManagerView: View {
             Spacer()
             Button(action: {}) { Image(systemName: "tray.and.arrow.down.fill") }.buttonStyle(.borderless)
             Button(action: {}) { Image(systemName: "tray.and.arrow.up.fill") }.buttonStyle(.borderless)
-            Button(action: {}) { Image(systemName: "plus") }.buttonStyle(.borderless)
+            Button(action: { showRuleEditor = true }) { Image(systemName: "plus") }.buttonStyle(.borderless)
+                .help("Add a rule manually")
         }
         .padding(8)
         .foregroundColor(PSTheme.textSecondary)
@@ -198,6 +203,11 @@ struct RulesManagerView: View {
             Text(emptySubtitle)
                 .font(.system(size: 12)).foregroundColor(PSTheme.textMuted)
                 .multilineTextAlignment(.center).frame(maxWidth: 360)
+            if state.rules.isEmpty {
+                Button("Add Rule") { showRuleEditor = true }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 4)
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -13,6 +13,7 @@ struct MiniMiscView: View {
     let close: () -> Void
 
     @State private var timeWindow: ActivityTimeWindow = .all
+    @State private var expandedKeys: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -44,8 +45,8 @@ struct MiniMiscView: View {
 
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(Array(connections.prefix(60))) { connection in
-                        MiniConnectionRow(connection: connection)
+                    ForEach(groups) { group in
+                        groupRow(group)
                     }
                     if connections.isEmpty {
                         MiniPlaceholder(emptyMessage: emptyMessage)
@@ -69,6 +70,85 @@ struct MiniMiscView: View {
                 .sorted { $0.lastSeen > $1.lastSeen }
         }
         return state.unattributedHistory.sorted { $0.lastSeen > $1.lastSeen }
+    }
+
+    /// One collapsible group per process. Unattributed rows have no stable
+    /// audience id, so the key is the process identity string.
+    private struct ProcessGroup: Identifiable {
+        let key: String
+        let name: String
+        let icon: NSImage?
+        let connections: [Connection]
+        var id: String { key }
+    }
+
+    private var groups: [ProcessGroup] {
+        var order: [String] = []
+        var buckets: [String: [Connection]] = [:]
+        for connection in connections {
+            let raw = connection.processBundleId ?? connection.processPath ?? connection.processName
+            let groupKey = raw.isEmpty ? "Unknown" : raw
+            if buckets[groupKey] == nil { order.append(groupKey) }
+            buckets[groupKey, default: []].append(connection)
+        }
+        return order.map { key in
+            let conns = buckets[key] ?? []
+            let first = conns.first
+            let name = first.flatMap { $0.processName.isEmpty ? nil : $0.processName } ?? key
+            let icon = first.flatMap {
+                AppIcon.resolve(bundleId: $0.processBundleId, path: $0.processPath, name: $0.processName)
+            }
+            return ProcessGroup(key: key, name: name, icon: icon, connections: conns)
+        }
+    }
+
+    private func groupRow(_ group: ProcessGroup) -> some View {
+        VStack(spacing: 0) {
+            Button {
+                toggle(group.key)
+            } label: {
+                HStack(spacing: 8) {
+                    if let icon = group.icon {
+                        Image(nsImage: icon).resizable().frame(width: 16, height: 16)
+                    } else {
+                        Image(systemName: "app.dashed")
+                            .foregroundColor(PSTheme.textSecondary)
+                            .frame(width: 16, height: 16)
+                    }
+                    Text(group.name)
+                        .font(.system(size: 12))
+                        .foregroundColor(PSTheme.textPrimary)
+                        .lineLimit(1)
+                    Spacer()
+                    Text("\(group.connections.count)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(PSTheme.textSecondary)
+                    Image(systemName: expandedKeys.contains(group.key) ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9))
+                        .foregroundColor(PSTheme.textMuted)
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 14).padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+
+            if expandedKeys.contains(group.key) {
+                VStack(spacing: 0) {
+                    ForEach(Array(group.connections.prefix(15))) { connection in
+                        MiniConnectionRow(connection: connection)
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+        }
+    }
+
+    private func toggle(_ key: String) {
+        if expandedKeys.contains(key) {
+            expandedKeys.remove(key)
+        } else {
+            expandedKeys.insert(key)
+        }
     }
 
     private var emptyMessage: String {

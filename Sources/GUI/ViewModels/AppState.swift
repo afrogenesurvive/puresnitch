@@ -47,6 +47,9 @@ final class AppState: ObservableObject {
     @Published var audiences: [Audience] = []
     @Published var audienceSummaries: [AudienceSummary] = []
     @Published var proxyReport: ProxyExpectationReport?
+    /// Recent requests recorded by the dev_mon (DS-mon) local proxy, read
+    /// straight from its usage database. Pure read — PureSnitch never writes it.
+    @Published var devmonRequests: [DevMonRequest] = []
     /// A time window pulled from the persisted audit trail. The live snapshot the
     /// helper pushes is capped, so a window can reach rows the UI never saw.
     @Published var auditHistory: [Connection] = []
@@ -245,6 +248,18 @@ final class AppState: ObservableObject {
         helper.proxyExpectationReport { [weak self] report in
             self?.proxyReport = report
         }
+        refreshDevMonRequests()
+    }
+
+    /// Reads dev_mon's request log directly. The query is indexed and cheap,
+    /// but it runs off the main thread so a slow first open never stalls the UI.
+    func refreshDevMonRequests() {
+        Task { [weak self] in
+            let requests = await Task.detached(priority: .utility) {
+                DevMonReader.recent(limit: 50)
+            }.value
+            self?.devmonRequests = requests
+        }
     }
 
     /// Pulls a time window from the persisted audit trail. The live snapshot is
@@ -384,6 +399,24 @@ final class AppState: ObservableObject {
             self.hasLoadedRulesFromHelper = true
             self.syncSharedRules()
         }
+    }
+
+    /// Adds a rule created by hand (the Rules window's "+" editor) — the same
+    /// path a remembered alert decision takes: validate, optimistic append,
+    /// helper upsert, then push the snapshot to the Network System Extension.
+    func addRule(_ rule: Rule) {
+        do {
+            try rule.validateForPersistence()
+        } catch {
+            appendLog(level: "error", message: "Rule not saved: \(error.localizedDescription)")
+            return
+        }
+        if !rules.contains(where: { $0.id == rule.id }) {
+            rules.append(rule)
+        }
+        helper.addRule(rule)
+        syncSharedRules()
+        refreshRules()
     }
 
     /// Mirror the active rules + mode into the app-group container so the
