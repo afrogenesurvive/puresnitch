@@ -244,6 +244,13 @@ An MCP server is declared in one of several client configuration files, all of w
 
 Symlinks that escape the owner's home are refused, repository discovery stops at 200 repositories, and files above 1 MiB are skipped.
 
+Well-known local services get dedicated auto-discovered audiences: `devmon-proxy`
+(18080) and `devmon-sync` (18888), both present when the dev_mon (DS-mon) app is
+installed, and `frontdesk` (3199), the Dev Centre webhook server, which is keyed
+purely on its port because it runs as a plain `node` process. Each audience is
+loopback-only; connection rows badge these ports with a `proxy` / `DS-mon sync` /
+`frontdesk` chip via `AppConstants.serviceLabel(forPort:)`.
+
 ### Declaration versus observation
 
 `ProxyDeclaration` records what a client *says* it will do: a base URL for a provider, never a credential, classified as `localProxy` (the recording proxy port), `localService` (another loopback service, such as a local model server) or `remoteEndpoint` (a provider reached directly). `ProxyExpectationBuilder` compares that declaration with the traffic actually observed and returns a `ProxyExpectationVerdict`: `proxied`, `bypassed`, `localEndpoint`, `idle` or `unattributed`. The report also lists `unproxiedAudiences`, audiences seen reaching remote hosts directly while nothing pointed them at a local proxy, which is derived from observation rather than declaration.

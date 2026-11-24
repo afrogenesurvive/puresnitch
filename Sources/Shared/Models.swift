@@ -728,7 +728,22 @@ public struct AppConstants {
     /// this port is "proxied" and recorded there; anything else is a direct
     /// provider call that dev_mon never sees.
     public static let devmonProxyPort = 18080
+    /// Port dev_mon (DS-mon) runs its data-sync service on. Loopback-only.
+    public static let devmonSyncPort = 18888
+    /// Port the Dev Centre "frontdesk" webhook server listens on.
+    public static let frontdeskPort = 3199
     public static let ollamaPort = 11434
+
+    /// Human label for the well-known local service ports PureSnitch badges in
+    /// connection rows. `nil` for ports it does not recognise.
+    public static func serviceLabel(forPort port: Int) -> String? {
+        switch port {
+        case devmonProxyPort: return "proxy"
+        case devmonSyncPort: return "DS-mon sync"
+        case frontdeskPort: return "frontdesk"
+        default: return nil
+        }
+    }
 
     public static var supportDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first

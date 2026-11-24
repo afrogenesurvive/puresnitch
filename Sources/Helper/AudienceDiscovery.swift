@@ -102,12 +102,16 @@ struct AudienceDiscovery {
         }
 
         if let audience = proxyAudience(declarations: result.declarations) { result.audiences.append(audience) }
+        if let audience = devmonSyncAudience() { result.audiences.append(audience) }
+        result.audiences.append(frontdeskAudience())
 
         for root in configuration.repositoryRoots {
             for repo in repositoryDirectories(under: root) {
                 let name = repo.lastPathComponent
                 result.audiences.append(repositoryAudience(name: name, path: repo.path))
-                if let port = localServicePort(in: repo) {
+                // The frontdesk port is owned by its dedicated audience above;
+                // a repo declaring it would otherwise produce a duplicate.
+                if let port = localServicePort(in: repo), port != AppConstants.frontdeskPort {
                     result.audiences.append(localServiceAudience(name: name, port: port))
                 }
             }
@@ -363,14 +367,20 @@ struct AudienceDiscovery {
         }
     }
 
+    /// Whether the dev_mon (DS-mon) app bundle is present in any scanned
+    /// application directory. Shared by the proxy and sync audiences so the two
+    /// well-known ports appear (or disappear) together.
+    private var devmonInstalled: Bool {
+        let devmonApps = ["dev_mon.app", "dev-mon.app", "DS-mon.app"]
+        return configuration.applicationDirectories.contains { directory in
+            devmonApps.contains { fileManager.fileExists(atPath: directory.appendingPathComponent($0).path) }
+        }
+    }
+
     /// The proxy itself, as a destination. Seeded from what clients declared
     /// plus, when the app is installed, dev_mon's well-known port.
     private func proxyAudience(declarations: [ProxyDeclaration]) -> Audience? {
         var ports = Set(declarations.filter { $0.isLoopback }.compactMap { $0.port })
-        let devmonApps = ["dev_mon.app", "dev-mon.app", "DS-mon.app"]
-        let devmonInstalled = configuration.applicationDirectories.contains { directory in
-            devmonApps.contains { fileManager.fileExists(atPath: directory.appendingPathComponent($0).path) }
-        }
         if devmonInstalled { ports.insert(AppConstants.devmonProxyPort) }
         guard !ports.isEmpty else { return nil }
 
@@ -385,6 +395,37 @@ struct AudienceDiscovery {
             source: .autoDiscovered,
             matchers: matchers,
             notes: "Local provider proxy: traffic here is recorded, traffic that skips it is not"
+        )
+    }
+
+    /// DS-mon's data-sync service (`SyncManager`). It binds loopback only, so
+    /// the loopback-host-plus-port group is exactly the right shape, matching
+    /// the proxy audience.
+    private func devmonSyncAudience() -> Audience? {
+        guard devmonInstalled else { return nil }
+        return Audience(
+            name: "devmon-sync",
+            icon: "arrow.triangle.2.circlepath",
+            kind: .service,
+            source: .autoDiscovered,
+            matchers: Self.loopbackPortMatchers(port: AppConstants.devmonSyncPort, group: "sync-\(AppConstants.devmonSyncPort)"),
+            notes: "DS-mon data sync: pulls and pushes the usage database over loopback"
+        )
+    }
+
+    /// The Dev Centre "frontdesk" collaborator chat, served by the webhook
+    /// server on port 3199. The server binds all interfaces, but remote seats
+    /// arrive through a local cloudflared hop, so the traffic PureSnitch sees
+    /// is loopback. Unconditional: the port is the identity, since the server
+    /// is a plain `node` process with no app bundle to detect.
+    private func frontdeskAudience() -> Audience {
+        Audience(
+            name: "frontdesk",
+            icon: "bubble.left.and.bubble.right",
+            kind: .service,
+            source: .autoDiscovered,
+            matchers: Self.loopbackPortMatchers(port: AppConstants.frontdeskPort, group: "frontdesk-\(AppConstants.frontdeskPort)"),
+            notes: "Dev Centre frontdesk chat (webhook server): licence-authenticated, end-to-end encrypted"
         )
     }
 

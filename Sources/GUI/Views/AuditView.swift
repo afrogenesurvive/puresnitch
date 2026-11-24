@@ -390,8 +390,8 @@ struct AuditView: View {
                 .font(.system(size: 10)).foregroundColor(PSTheme.textSecondary).lineLimit(1)
             Text(":\(connection.remotePort)")
                 .font(.system(size: 10)).foregroundColor(PSTheme.textMuted)
-            if connection.remotePort == AppConstants.devmonProxyPort {
-                PSChip("proxy", color: PSTheme.accentGreen)
+            if let label = AppConstants.serviceLabel(forPort: connection.remotePort) {
+                PSChip(label, color: label == "proxy" ? PSTheme.accentGreen : PSTheme.accentBlue)
             }
         }
     }

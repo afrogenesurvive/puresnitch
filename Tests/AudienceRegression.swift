@@ -1167,6 +1167,68 @@ private func testMCPDiscoveryFromAdditionalSources() throws {
     }
 }
 
+private func testDevmonSyncAndFrontdeskAudiences() throws {
+    try withSyntheticHome { home in
+        let appsDir = home.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: appsDir.appendingPathComponent("DS-mon.app", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        let repositoryRoot = home.appendingPathComponent("Documents/GitHub", isDirectory: true)
+        let repository = repositoryRoot.appendingPathComponent("agent_repo", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: repository.appendingPathComponent(".git", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try writeFixture("{ \"service\": { \"port\": 3199 } }", to: repository.appendingPathComponent("devmon.json"))
+
+        var configuration = AudienceDiscovery.Configuration.standard(homeDirectory: home)
+        configuration.applicationDirectories = [appsDir]
+        let result = AudienceDiscovery(configuration: configuration).scan()
+        let names = Set(result.audiences.map(\.name))
+
+        try requireAudience(names.contains("devmon-sync"), "the DS-mon sync audience was not discovered")
+        try requireAudience(names.contains("devmon-proxy"), "the DS-mon proxy audience was not discovered")
+        try requireAudience(names.contains("frontdesk"), "the frontdesk audience was not discovered")
+        // The repo declares port 3199, but frontdesk owns it, so no generic
+        // service audience may duplicate it.
+        try requireAudience(!names.contains("service:agent_repo"), "the frontdesk port was duplicated as a generic service audience")
+
+        let sync = try requireAudienceUnwrap(result.audiences.first { $0.name == "devmon-sync" }, "devmon-sync went missing")
+        try requireAudience(
+            sync.matchers.contains { $0.kind == .remotePort && $0.pattern == "18888" },
+            "devmon-sync does not match port 18888"
+        )
+        let frontdesk = try requireAudienceUnwrap(result.audiences.first { $0.name == "frontdesk" }, "frontdesk went missing")
+        try requireAudience(
+            frontdesk.matchers.contains { $0.kind == .remotePort && $0.pattern == "3199" },
+            "frontdesk does not match port 3199"
+        )
+
+        // Loopback only: a LAN peer must not match either audience.
+        let resolver = AudienceResolver(audiences: [sync, frontdesk])
+        try requireAudience(
+            resolver.resolve(audienceConnection(remoteHost: "127.0.0.1", remoteIP: "127.0.0.1", remotePort: 18888))?.name == "devmon-sync",
+            "loopback 18888 was not attributed to devmon-sync"
+        )
+        try requireAudience(
+            resolver.resolve(audienceConnection(remoteHost: "203.0.113.9", remoteIP: "203.0.113.9", remotePort: 18888)) == nil,
+            "a LAN host was attributed to devmon-sync"
+        )
+        try requireAudience(
+            resolver.resolve(audienceConnection(remoteHost: "127.0.0.1", remoteIP: "127.0.0.1", remotePort: 3199))?.name == "frontdesk",
+            "loopback 3199 was not attributed to frontdesk"
+        )
+    }
+
+    // The connection-row chips come from the shared label helper.
+    try requireAudience(AppConstants.serviceLabel(forPort: 18080) == "proxy", "18080 was not labelled proxy")
+    try requireAudience(AppConstants.serviceLabel(forPort: 18888) == "DS-mon sync", "18888 was not labelled DS-mon sync")
+    try requireAudience(AppConstants.serviceLabel(forPort: 3199) == "frontdesk", "3199 was not labelled frontdesk")
+    try requireAudience(AppConstants.serviceLabel(forPort: 443) == nil, "an unknown port was labelled")
+}
+
 // MARK: - entry point
 
 func testAudienceAttributionAndPersistence() throws {
@@ -1184,6 +1246,7 @@ func testAudienceAttributionAndPersistence() throws {
     try testProxyDeclarationScanning()
     try testProxyExpectationVerdicts()
     try testAudienceDiscoveryAgainstSyntheticHome()
+    try testDevmonSyncAndFrontdeskAudiences()
     try testAudienceDiscoveryRefusesEscapingSymlinks()
     try testAudienceSeederReconciliation()
     try testMCPMatchPattern()

@@ -611,8 +611,8 @@ struct MiniConnectionRow: View {
                     .lineLimit(1)
             }
             Spacer()
-            if connection.remotePort == AppConstants.devmonProxyPort {
-                PSChip("proxy", color: PSTheme.accentGreen)
+            if let label = AppConstants.serviceLabel(forPort: connection.remotePort) {
+                PSChip(label, color: label == "proxy" ? PSTheme.accentGreen : PSTheme.accentBlue)
             }
             VStack(alignment: .trailing, spacing: 1) {
                 Text("↓ \(inText)  ↑ \(outText)")
